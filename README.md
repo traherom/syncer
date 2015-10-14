@@ -9,6 +9,11 @@ TODO!
 
 # Install
 If you have go installed, you can easily install to your $GOPATH/bin via:
+
+     $ go install github.com/traherom/syncer
+
+Alternatively, you can retrieve the source code via:
+
      $ go get github.com/traherom/syncer
 
 Binaries will eventually be posted. TODO!
