@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -56,10 +57,10 @@ func (h *Header) Sync() *SyncInfo {
 	return h.sync
 }
 
-// Create takes the given local file and turns it into a protected file
+// CreateProtectedFile takes the given local file and turns it into a protected file
 // at the given remote path. All paths should be relative to metadata's
 // respective base paths.
-func Create(sync *SyncInfo, protFilePath string, localFilePath string) (*Header, error) {
+func CreateProtectedFile(sync *SyncInfo, protFilePath string, localFilePath string) (*Header, error) {
 	header := new(Header)
 	header.sync = sync
 	header.localPath = localFilePath
@@ -69,9 +70,9 @@ func Create(sync *SyncInfo, protFilePath string, localFilePath string) (*Header,
 	return header, err
 }
 
-// Open reads the header of the given protected file and returns the data
+// OpenProtectedFile reads the header of the given protected file and returns the data
 // needed to work further with that file.
-func Open(sync *SyncInfo, protFilePath string, keys *gocrypt.KeyCombo) (*Header, error) {
+func OpenProtectedFile(sync *SyncInfo, protFilePath string, keys *gocrypt.KeyCombo) (*Header, error) {
 	f, err := os.Open(protFilePath)
 	if err != nil {
 		return nil, err
@@ -140,26 +141,6 @@ func Open(sync *SyncInfo, protFilePath string, keys *gocrypt.KeyCombo) (*Header,
 	}
 
 	return header, nil
-}
-
-func readKey(buf *bufio.Reader) (gocrypt.Key, error) {
-	key, err := readFixedSize(buf, aes.KeyLength)
-	return key, err
-}
-
-func readFixedSize(buf *bufio.Reader, desiredCount int) ([]byte, error) {
-	b := make([]byte, desiredCount)
-	n, err := buf.Read(b)
-	if err != nil {
-		return nil, &ErrProtectedFile{"Unable to read key", err}
-	}
-	if n != desiredCount {
-		return nil, &ErrProtectedFile{
-			fmt.Sprintf("Did not read entire key (got %v of %v)", n, desiredCount),
-			nil}
-	}
-
-	return b, nil
 }
 
 // Write rebuilds the protected file on disk, ensuring the contents and header
@@ -245,7 +226,8 @@ func (h *Header) Write() error {
 	}
 
 	// Move file to final location
-	err = os.Rename(protFile.Name(), h.AbsRemotePath())
+	protFile.Close()
+	err = moveFile(protFile.Name(), h.AbsRemotePath())
 	if err != nil {
 		return &ErrProtectedFile{"Failed to move final protected file", err}
 	}
@@ -255,7 +237,60 @@ func (h *Header) Write() error {
 
 // ExtractContents decrypts the contents of the protected file onto the local path
 func (h *Header) ExtractContents() error {
+	// Skip to contents
+	protFile, err := os.Open(h.AbsRemotePath())
+	if err != nil {
+		return &ErrProtectedFile{"Unable to open protected file", err}
+	}
+	defer protFile.Close()
+
+	_, err = protFile.Seek(0, h.headerLen)
+	if err != nil {
+		return &ErrProtectedFile{"Unable to skip to contents", err}
+	}
+
+	// Decrypt to temp
+	tempFile, err := ioutil.TempFile("", "syncerdecryptedcontents")
+	if err != nil {
+		return &ErrProtectedFile{"Unable to create temp file", err}
+	}
+	defer func() {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+	}()
+
+	_, _, err = aes.Decrypt(protFile, tempFile, h.contentKeys)
+	if err != nil {
+		return &ErrProtectedFile{"Error during decryption", err}
+	}
+
+	// Move to final location
+	err = moveFile(tempFile.Name(), h.AbsLocalPath())
+	if err != nil {
+		return &ErrProtectedFile{"Failed to move decrypted file to local", err}
+	}
+
 	return nil
+}
+
+func readKey(buf *bufio.Reader) (gocrypt.Key, error) {
+	key, err := readFixedSize(buf, aes.KeyLength)
+	return key, err
+}
+
+func readFixedSize(buf *bufio.Reader, desiredCount int) ([]byte, error) {
+	b := make([]byte, desiredCount)
+	n, err := buf.Read(b)
+	if err != nil {
+		return nil, &ErrProtectedFile{"Unable to read key", err}
+	}
+	if n != desiredCount {
+		return nil, &ErrProtectedFile{
+			fmt.Sprintf("Did not read entire key (got %v of %v)", n, desiredCount),
+			nil}
+	}
+
+	return b, nil
 }
 
 // ErrProtectedFile represents possible errors from a protected file
@@ -270,4 +305,53 @@ func (e *ErrProtectedFile) Error() string {
 	}
 
 	return fmt.Sprintf("protected file: %v: %v", e.Msg, e.Inner)
+}
+
+// moveFile attempts to move the given file via an os.Rename(). If that
+// failes, a full move with a copy of all bytes is performed, then the original
+// file is deleted.
+func moveFile(src, dst string) error {
+	err := os.Rename(src, dst)
+	if err != nil {
+		// Attempt copy-then-delete
+		if err = copyFileContents(src, dst); err != nil {
+			return err
+		}
+
+		if err = os.Remove(src); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// copyFileContents copies the contents of the file named src to the file named
+// by dst. The file will be created if it does not already exist. If the
+// destination file exists, all it's contents will be replaced by the contents
+// of the source file.
+func copyFileContents(src, dst string) (err error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return
+	}
+	defer func() {
+		cerr := out.Close()
+		if err == nil {
+			err = cerr
+		}
+	}()
+
+	if _, err = io.Copy(out, in); err != nil {
+		return
+	}
+
+	err = out.Sync()
+	return
 }

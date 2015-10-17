@@ -20,7 +20,7 @@ var mainKeys = &gocrypt.KeyCombo{
 // TestCreateLoadSync creates a sync, loads that same sync, and ensures the loaded
 // sync is identical to the created one.
 func TestCreateLoadSync(t *testing.T) {
-	defer cleanup()
+	//defer cleanup()
 
 	created, err := CreateSync(localDir, remoteDir, mainKeys)
 	if err != nil {

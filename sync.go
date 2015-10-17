@@ -111,14 +111,13 @@ func LoadSync(localPath string) (*SyncInfo, error) {
 }
 
 // CreateSync initializes and loads a new sync between the given local and remote paths.
-// Directories are created with restrictive permissions by default (0700)
 func CreateSync(localPath string, remotePath string, keys *gocrypt.KeyCombo) (sync *SyncInfo, err error) {
 	// Create any directories necessary
 	dbPath := filepath.Join(localPath, settingsDir, dbFileName)
-	if err = os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+	if err = os.MkdirAll(filepath.Dir(dbPath), 0777); err != nil {
 		return nil, &ErrSync{"Unable to create local path", err}
 	}
-	if err = os.MkdirAll(remotePath, 0700); err != nil {
+	if err = os.MkdirAll(remotePath, 0777); err != nil {
 		return nil, &ErrSync{"Unable to create remote path", err}
 	}
 
