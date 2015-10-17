@@ -73,7 +73,8 @@ mainLoop:
 		}
 	}
 
-	// All done
+	// TODO timeout on waiting?
+	fmt.Println("Requesting that handlers close")
 	close(die)
 	wg.Wait()
 }

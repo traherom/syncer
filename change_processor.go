@@ -8,16 +8,16 @@ import (
 
 // ErrProcessor present any errors occuring change processing
 type ErrProcessor struct {
-	msg      string
-	internal error
+	Msg   string
+	Inner error
 }
 
 func (e *ErrProcessor) Error() string {
-	if e.internal == nil {
-		return fmt.Sprintf("change processor: %v", e.msg)
+	if e.Inner == nil {
+		return fmt.Sprintf("change processor: %v", e.Msg)
 	}
 
-	return fmt.Sprintf("change processor: %v: %v", e.msg, e.internal)
+	return fmt.Sprintf("change processor: %v: %v", e.Msg, e.Inner)
 }
 
 // ChangeType represents the type of change which has occured. Values for this
@@ -39,11 +39,12 @@ const (
 // It is general. The inclusion of the specific SyncInfo it belongs to allows
 // a change processor to be shared amongst multiple syncs
 type Change struct {
-	LocalPath  string     // Path to changed file relative to sync.LocalBase()
-	RemotePath string     // Path to changed file relative to sync.RemoteBase()
-	ChangeType ChangeType // Type of change
-	Sync       *SyncInfo  // Sync this change is a part of
-	id         int        // Internal database id of this change
+	LocalPath  string      // Path to changed file relative to sync.LocalBase()
+	RemotePath string      // Path to changed file relative to sync.RemoteBase()
+	ChangeType ChangeType  // Type of change
+	CacheEntry *CacheEntry // If this change involves previously known files, this may be populated
+	Sync       *SyncInfo   // Sync this change is a part of
+	id         int         // Internal database id of this change
 }
 
 // ChangeQueueManager establishes change processing workers and farms work out
@@ -52,7 +53,9 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 	// Establish workers
 	var wg sync.WaitGroup
 	defer func() {
+		fmt.Println("Waiting for all change precessors to end")
 		wg.Wait()
+		fmt.Println("All processors ended")
 	}()
 
 	todo := make(chan Change)
@@ -79,6 +82,12 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 			return
 		}
 
+		_, err = sync.db.Exec("UPDATE change_queue SET processing=1 WHERE id=?", change.id)
+		if err != nil {
+			errors <- &ErrProcessor{"Unable to mark change as in-progress", err}
+			return
+		}
+
 		todo <- change
 	}
 
@@ -86,9 +95,13 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 		// New change?
 		select {
 		case change := <-newChanges:
-			// Check for conflict
+			// TODO Check for conflict
+			//if conflictExists(change) {
+
+			//}
+
 			// Put in database
-			res, err := change.Sync.db.Exec("INSERT INTO change_queue (time_added, change_type, rel_local_path, rel_remote_path) VALUES (NEW(), ?, ?, ?)",
+			res, err := change.Sync.db.Exec("INSERT INTO change_queue (time_added, change_type, rel_local_path, rel_remote_path) VALUES (datetime('now'), ?, ?, ?)",
 				change.ChangeType, change.LocalPath, change.RemotePath)
 			if err != nil {
 				errors <- &ErrProcessor{"Unable to put change into database", err}
@@ -112,7 +125,7 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 
 		case change := <-completed:
 			// Drop change from database
-			_, err := change.Sync.db.Exec("DELETE FROM change_queue WHERE id=?", change.id)
+			_, err := change.Sync.db.Exec("DELETE FROM change_queue WHERE id=? LIMIT 1", change.id)
 			if err != nil {
 				errors <- &ErrProcessor{"Error removing change from database", err}
 			}
@@ -127,11 +140,37 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 }
 
 func changeProcessor(incoming chan Change, failed chan Change, completed chan Change, die chan bool) {
-	// Get change
-	// processing
-	// Return to ChangeQueueManager as completed or failed, as appropriate
-	<-die
-	fmt.Println("Change processor quitting")
+	defer func() {
+		fmt.Println("Change processor quitting")
+	}()
+
+	for {
+		select {
+		case change := <-incoming:
+			// TODO extract/encrypt as necessary and update entry in db
+			switch change.ChangeType {
+			case LocalAdd:
+				fallthrough
+			case LocalChange:
+				// Place/overwrite remote
+				fallthrough
+
+			case LocalDelete:
+				fallthrough
+			case RemoteAdd:
+				fallthrough
+			case RemoteChange:
+				fallthrough
+			case RemoteDelete:
+				break
+			}
+
+			// Return to ChangeQueueManager as completed or failed, as appropriate
+			//completed <- change
+		case <-die:
+			return
+		}
+	}
 }
 
 // PrepareChangeQueue readies the given sync for use with the change queue manager, including establishing

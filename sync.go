@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gopkg.in/fsnotify.v1"
 
-	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
+	_ "github.com/mattn/go-sqlite3" // SQLite3 driver will register itself
 	"github.com/traherom/fsnotifydeep"
 	"github.com/traherom/gocrypt"
 	"github.com/traherom/gocrypt/aes"
@@ -269,7 +270,9 @@ func (s *SyncInfo) Set(name string, value string) (previous string, err error) {
 func (s *SyncInfo) Monitor(changes chan Change, errors chan error, die chan bool) {
 	var wg sync.WaitGroup
 	defer func() {
+		fmt.Println("Waiting for all monitor subprocessors to end")
 		wg.Wait()
+		fmt.Println("All monitoring ended")
 	}()
 
 	// Ensure we're ready for the change processor
@@ -302,9 +305,75 @@ watchLoop:
 	for {
 		select {
 		case evt := <-localWatcher.Events:
-			fmt.Println(evt)
+			newChange := new(Change)
+			newChange.Sync = s
+			newChange.LocalPath, err = filepath.Rel(s.LocalBase(), evt.Name)
+			if err != nil {
+				fmt.Printf("Unable to compute relative path for %v and %v\n", s.LocalBase(), evt.Name)
+				fmt.Println("Not handling event")
+				continue
+			}
+
+			switch evt.Op {
+			case fsnotify.Create:
+				newChange.ChangeType = LocalAdd
+			case fsnotify.Remove:
+				newChange.ChangeType = LocalDelete
+			case fsnotify.Write:
+				newChange.ChangeType = LocalChange
+			default:
+				panic(fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op))
+			}
+
+			// Get current remote path
+			if evt.Op != fsnotify.Create {
+				entry, err := GetCacheEntryViaLocal(s, newChange.LocalPath)
+				if err != nil {
+					fmt.Printf("Unable to get remote path for %v\n", newChange.LocalPath)
+				} else {
+					newChange.RemotePath = entry.RemotePath
+					newChange.CacheEntry = &entry
+				}
+			}
+
+			fmt.Println("Pushing local change:", newChange)
+			changes <- *newChange
+
 		case evt := <-remoteWatcher.Events:
-			fmt.Println(evt)
+			newChange := new(Change)
+			newChange.Sync = s
+			newChange.RemotePath, err = filepath.Rel(s.RemoteBase(), evt.Name)
+			if err != nil {
+				fmt.Printf("Unable to compute relative path for %v and %v\n", s.RemoteBase(), evt.Name)
+				fmt.Println("Not handling event")
+				continue
+			}
+
+			switch evt.Op {
+			case fsnotify.Create:
+				newChange.ChangeType = RemoteAdd
+			case fsnotify.Remove:
+				newChange.ChangeType = RemoteDelete
+			case fsnotify.Write:
+				newChange.ChangeType = RemoteChange
+			default:
+				panic(fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op))
+			}
+
+			// Get current remote path
+			if evt.Op != fsnotify.Create {
+				entry, err := GetCacheEntryViaRemote(s, newChange.RemotePath)
+				if err != nil {
+					fmt.Printf("Unable to get remote path for %v\n", newChange.RemotePath)
+				} else {
+					newChange.RemotePath = entry.RemotePath
+					newChange.CacheEntry = &entry
+				}
+			}
+
+			fmt.Println("Pushing remote change:", newChange)
+			changes <- *newChange
+
 		case err := <-localWatcher.Errors:
 			fmt.Println("Error during monitoring local:", err)
 		case err := <-remoteWatcher.Errors:
@@ -332,7 +401,11 @@ func watcherForDir(root string) (*fsnotifydeep.Watcher, error) {
 	}
 
 	watcher.Filter(func(evt fsnotify.Event) bool {
-		return evt.Op == fsnotify.Create || evt.Op == fsnotify.Remove || evt.Op == fsnotify.Write
+		// Only create, remove, and write on NOT .syncer directories
+		return ((evt.Op == fsnotify.Create ||
+			evt.Op == fsnotify.Remove ||
+			evt.Op == fsnotify.Write) &&
+			!strings.Contains(evt.Name, settingsDir))
 	})
 
 	err = watcher.Add(root)
