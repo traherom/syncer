@@ -119,7 +119,7 @@ func OpenProtectedFile(sync *SyncInfo, protFilePath string, keys *gocrypt.KeyCom
 			return nil, &ErrProtectedFile{"Unable to read auth key", err}
 		}
 
-		header.contentHash, err = readFixedSize(buf, 32) // TODO use constant
+		header.contentHash, err = readFixedSize(buf, hash.Sha256Size)
 		if err != nil {
 			return nil, &ErrProtectedFile{"Unable to read content hash", err}
 		}
@@ -196,6 +196,10 @@ func (h *Header) Write() error {
 		return &ErrProtectedFile{"Unable to write local path", err}
 	}
 
+	if err = writer.Flush(); err != nil {
+		return &ErrProtectedFile{"Flushing header failed", err}
+	}
+
 	// Encrypt and write header to temp file
 	protFile, err := ioutil.TempFile("", "syncerprotfile")
 	if err != nil {
@@ -203,8 +207,7 @@ func (h *Header) Write() error {
 	}
 	defer func() {
 		protFile.Close()
-		tmpName := protFile.Name()
-		os.Remove(tmpName)
+		os.Remove(protFile.Name())
 	}()
 
 	headerBytes.Rewind()
@@ -214,10 +217,17 @@ func (h *Header) Write() error {
 		return &ErrProtectedFile{"Unable to encrypt header", err}
 	}
 
+	// Update length of header. Not in file, just used internally for extracting
+	headLen, err := protFile.Seek(0, 1)
+	h.headerLen = int(headLen)
+	if err != nil {
+		return &ErrProtectedFile{"Unable to determine length of header", err}
+	}
+
 	// Encrypt and append contents
 	_, err = localFile.Seek(0, 0)
 	if err != nil {
-		return &ErrProtectedFile{"Unable to seek in local file", err}
+		return &ErrProtectedFile{"Unable to return to beginning of local file", err}
 	}
 
 	_, _, err = aes.Encrypt(localFile, protFile, h.contentKeys)
@@ -244,7 +254,7 @@ func (h *Header) ExtractContents() error {
 	}
 	defer protFile.Close()
 
-	_, err = protFile.Seek(0, h.headerLen)
+	_, err = protFile.Seek(int64(h.headerLen), 0)
 	if err != nil {
 		return &ErrProtectedFile{"Unable to skip to contents", err}
 	}
@@ -259,12 +269,14 @@ func (h *Header) ExtractContents() error {
 		os.Remove(tempFile.Name())
 	}()
 
+	_ = "breakpoint"
 	_, _, err = aes.Decrypt(protFile, tempFile, h.contentKeys)
 	if err != nil {
 		return &ErrProtectedFile{"Error during decryption", err}
 	}
 
 	// Move to final location
+	tempFile.Close()
 	err = moveFile(tempFile.Name(), h.AbsLocalPath())
 	if err != nil {
 		return &ErrProtectedFile{"Failed to move decrypted file to local", err}

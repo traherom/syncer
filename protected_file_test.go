@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"io/ioutil"
 	"path/filepath"
 	"testing"
+
+	"github.com/traherom/gocrypt"
 )
 
 func TestCreate(t *testing.T) {
@@ -30,6 +33,11 @@ func TestCreate(t *testing.T) {
 		t.Error(err)
 		return
 	}
+
+	fmt.Println("Local:", header.localPath)
+	fmt.Println("Remote:", header.remotePath)
+	fmt.Println("Len:", header.headerLen)
+	fmt.Printf("Content hash (%v bytes): %v\n", len(header.contentHash), gocrypt.BytesToB64(header.contentHash))
 
 	// Extract under a different name and compare
 	header.localPath = "extracted.txt"
