@@ -10,11 +10,17 @@ import (
 )
 
 func main() {
-	const localDir = "run/local"
-	const remoteDir = "run/remote"
+	localDir := filepath.FromSlash("run/local")
+	remoteDir := filepath.FromSlash("run/remote")
+	fmt.Println(remoteDir, filepath.Separator, filepath.Dir(localDir))
 
 	var testSync *SyncInfo
 	if _, err := os.Stat(filepath.Dir(localDir)); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Println("Error checking if sync exists:", err)
+			return
+		}
+
 		fmt.Println("Creating sync")
 		keys, err := aes.NewKeyCombo()
 		if err != nil {
@@ -39,7 +45,7 @@ func main() {
 	// Change processor
 	var wg sync.WaitGroup
 	die := make(chan bool)
-	changes := make(chan Change)
+	changes := make(chan *Change)
 	errors := make(chan error)
 
 	wg.Add(1)
@@ -59,6 +65,7 @@ func main() {
 	end := make(chan bool)
 	go func() {
 		fmt.Scanln()
+		fmt.Scanln()
 		close(end)
 	}()
 
@@ -77,4 +84,5 @@ mainLoop:
 	fmt.Println("Requesting that handlers close")
 	close(die)
 	wg.Wait()
+	fmt.Println("Syncer ended cleanly")
 }

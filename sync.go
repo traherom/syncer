@@ -76,8 +76,7 @@ func LoadSync(localPath string) (*SyncInfo, error) {
 	if sync.remoteBase, err = sync.Get(remotePathKey); err != nil {
 		return nil, &ErrSync{"Remote path not set", err}
 	}
-
-	if sync.remoteBase, err = filepath.Abs(sync.remoteBase); err != nil {
+	if sync.remoteBase, err = filepath.Abs(filepath.FromSlash(sync.remoteBase)); err != nil {
 		return nil, &ErrSync{"Unable to get absolute remote path", err}
 	}
 
@@ -100,7 +99,7 @@ func LoadSync(localPath string) (*SyncInfo, error) {
 		return nil, &ErrSync{"Failed to convert authentication key", err}
 	}
 
-	sync.keys = &gocrypt.KeyCombo{cKey, aKey} // go vet complains about unkeyed fields, ignore
+	sync.keys = &gocrypt.KeyCombo{CryptoKey: cKey, AuthKey: aKey} // go vet complains about unkeyed fields, ignore
 
 	// Make sure everything loaded correctly
 	if err = sync.sanityCheckConfig(); err != nil {
@@ -141,7 +140,7 @@ func CreateSync(localPath string, remotePath string, keys *gocrypt.KeyCombo) (sy
 
 	sync.keys = keys
 
-	sync.Set(remotePathKey, filepath.Clean(remotePath))
+	sync.Set(remotePathKey, filepath.ToSlash(filepath.Clean(remotePath)))
 	sync.Set(cryptoKeyKey, keys.CryptoKey.String())
 	sync.Set(authKeyKey, keys.AuthKey.String())
 
@@ -266,7 +265,7 @@ func (s *SyncInfo) Set(name string, value string) (previous string, err error) {
 //
 // This function expects to execute as a goroutine. Using the accepted channel,
 // passing in true will result in the monitor cleanly exiting its subcomponents.
-func (s *SyncInfo) Monitor(changes chan Change, errors chan error, die chan bool) {
+func (s *SyncInfo) Monitor(changes chan *Change, errors chan error, die chan bool) {
 	var wg sync.WaitGroup
 	defer func() {
 		fmt.Println("Waiting for all monitor subprocessors to end")
@@ -313,6 +312,8 @@ watchLoop:
 				continue
 			}
 
+			fmt.Printf("Sync is %#v when event was receive\n", newChange)
+
 			switch evt.Op {
 			case fsnotify.Create:
 				newChange.ChangeType = LocalAdd
@@ -324,19 +325,23 @@ watchLoop:
 				panic(fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op))
 			}
 
+			fmt.Printf("Sync is %#v when event was receive\n", newChange)
+
 			// Get current remote path
 			if evt.Op != fsnotify.Create {
 				entry, err := GetCacheEntryViaLocal(s, newChange.LocalPath)
 				if err != nil {
 					fmt.Printf("Unable to get remote path for %v\n", newChange.LocalPath)
 				} else {
-					newChange.RemotePath = entry.RemotePath
-					newChange.CacheEntry = &entry
+					newChange.RemotePath = entry.RemotePath()
+					newChange.CacheEntry = entry
 				}
 			}
 
+			fmt.Printf("Sync is %#v when event was receive\n", newChange)
+
 			fmt.Println("Pushing local change:", newChange)
-			changes <- *newChange
+			changes <- newChange
 
 		case evt := <-remoteWatcher.Events:
 			newChange := new(Change)
@@ -365,13 +370,13 @@ watchLoop:
 				if err != nil {
 					fmt.Printf("Unable to get remote path for %v\n", newChange.RemotePath)
 				} else {
-					newChange.RemotePath = entry.RemotePath
-					newChange.CacheEntry = &entry
+					newChange.RemotePath = entry.RemotePath()
+					newChange.CacheEntry = entry
 				}
 			}
 
 			fmt.Println("Pushing remote change:", newChange)
-			changes <- *newChange
+			changes <- newChange
 
 		case err := <-localWatcher.Errors:
 			fmt.Println("Error during monitoring local:", err)
@@ -387,7 +392,7 @@ watchLoop:
 
 // initialScan looks for changes that have occured since the last time
 // this sync was monitored
-func (s *SyncInfo) initialScan(changes chan Change, die chan bool) {
+func (s *SyncInfo) initialScan(changes chan *Change, die chan bool) {
 
 }
 

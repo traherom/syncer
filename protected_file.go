@@ -14,15 +14,12 @@ import (
 	"github.com/traherom/memstream"
 )
 
-// Hash represents a file hash
-type Hash []byte
-
 // A Header contains the header of an encrypted file and the metadata needed to
 // work with that file
 type Header struct {
 	// Hash (not HMAC) of the unencrypted version of the protected contents.
 	// That is, this is the hash of the protected file if it were decrypted.
-	contentHash Hash
+	contentHash gocrypt.Hash
 	localPath   string            // Path, relative to sync.LocalBase, of this file's unencrypted version
 	remotePath  string            // Path, relative to sync.RemoteBase, of the protected file
 	contentKeys *gocrypt.KeyCombo // Keys used for the encrypted contents of this file
@@ -57,6 +54,24 @@ func (h *Header) Sync() *SyncInfo {
 	return h.sync
 }
 
+// ContentHash returns the hash of the unencrypted contents of this file (ie,
+// after extraction the file will have this hash).
+func (h *Header) ContentHash() gocrypt.Hash {
+	return h.contentHash
+}
+
+// RemoteHash returns the hash of the full protected file. This is an expensive
+// operation, as the value is not chached.
+func (h *Header) RemoteHash() (gocrypt.Hash, error) {
+	f, err := os.Open(h.AbsRemotePath())
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return hash.Sha256(f)
+}
+
 // CreateProtectedFile takes the given local file and turns it into a protected file
 // at the given remote path. All paths should be relative to metadata's
 // respective base paths.
@@ -72,7 +87,7 @@ func CreateProtectedFile(sync *SyncInfo, protFilePath string, localFilePath stri
 
 // OpenProtectedFile reads the header of the given protected file and returns the data
 // needed to work further with that file.
-func OpenProtectedFile(sync *SyncInfo, protFilePath string, keys *gocrypt.KeyCombo) (*Header, error) {
+func OpenProtectedFile(sync *SyncInfo, protFilePath string) (*Header, error) {
 	f, err := os.Open(protFilePath)
 	if err != nil {
 		return nil, err
@@ -81,7 +96,8 @@ func OpenProtectedFile(sync *SyncInfo, protFilePath string, keys *gocrypt.KeyCom
 
 	// Decrypt header
 	headBytes := memstream.New()
-	encHeadLen, _, err := aes.Decrypt(f, headBytes, keys)
+	keys := sync.Keys()
+	encHeadLen, _, err := aes.Decrypt(f, headBytes, &keys)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +285,6 @@ func (h *Header) ExtractContents() error {
 		os.Remove(tempFile.Name())
 	}()
 
-	_ = "breakpoint"
 	_, _, err = aes.Decrypt(protFile, tempFile, h.contentKeys)
 	if err != nil {
 		return &ErrProtectedFile{"Error during decryption", err}

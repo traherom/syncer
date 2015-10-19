@@ -49,7 +49,7 @@ type Change struct {
 
 // ChangeQueueManager establishes change processing workers and farms work out
 // to them as needed.
-func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool) {
+func ChangeQueueManager(newChanges chan *Change, errors chan error, die chan bool) {
 	// Establish workers
 	var wg sync.WaitGroup
 	defer func() {
@@ -58,15 +58,15 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 		fmt.Println("All processors ended")
 	}()
 
-	todo := make(chan Change)
-	failed := make(chan Change)
-	completed := make(chan Change)
+	todo := make(chan *Change)
+	failed := make(chan *Change)
+	completed := make(chan *Change)
 	for i := 0; i < runtime.NumCPU(); i++ {
 		fmt.Printf("Starting change processor %v\n", i+1)
 
 		wg.Add(1)
 		go func() {
-			changeProcessor(todo, failed, completed, die)
+			changeProcessor(todo, failed, completed, errors, die)
 			wg.Done()
 		}()
 	}
@@ -74,7 +74,9 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 	// Any time we receive a new change or complete/fail processing on a change,
 	// put a new item from that sync into the processing channel
 	pushOldestToProcessing := func(sync *SyncInfo) {
-		var change Change
+		change := new(Change)
+		change.Sync = sync
+
 		row := sync.db.QueryRow("SELECT id, change_type, rel_local_path, rel_remote_path FROM change_queue WHERE processing=0 ORDER BY time_added ASC LIMIT 1")
 		err := row.Scan(&change.id, &change.ChangeType, &change.LocalPath, &change.RemotePath)
 		if err != nil {
@@ -95,6 +97,8 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 		// New change?
 		select {
 		case change := <-newChanges:
+			// TODO Should ignore?
+
 			// TODO Check for conflict
 			//if conflictExists(change) {
 
@@ -139,7 +143,7 @@ func ChangeQueueManager(newChanges chan Change, errors chan error, die chan bool
 	}
 }
 
-func changeProcessor(incoming chan Change, failed chan Change, completed chan Change, die chan bool) {
+func changeProcessor(incoming chan *Change, failed chan *Change, completed chan *Change, errors chan error, die chan bool) {
 	defer func() {
 		fmt.Println("Change processor quitting")
 	}()
@@ -153,7 +157,72 @@ func changeProcessor(incoming chan Change, failed chan Change, completed chan Ch
 				fallthrough
 			case LocalChange:
 				// Place/overwrite remote
-				fallthrough
+				if change.Sync == nil {
+					fmt.Println("sync is nil in change")
+					fmt.Printf("sync in processor: %#v\n", change)
+				}
+				entry, err := GetCacheEntryViaLocal(change.Sync, change.LocalPath)
+				if err != nil {
+					_ = "breakpoint"
+					fmt.Println("here", err)
+				}
+
+				var prot *Header
+				if entry != nil {
+					// Overwrite current entry
+					prot, err = OpenProtectedFile(change.Sync, entry.RemotePath())
+					if err != nil {
+						errors <- &ErrProcessor{"Unable to update protected file", err}
+						failed <- change
+						break
+					}
+
+					if err = prot.Write(); err != nil {
+						errors <- &ErrProcessor{"Unable to write to protected file", err}
+						failed <- change
+						break
+					}
+				} else {
+					// New entry, so generate a remote path filename
+					remotePath, err := GetFreeRemotePath(change.Sync)
+					if err != nil {
+						errors <- err
+						failed <- change
+						break
+					}
+
+					prot, err = CreateProtectedFile(change.Sync, remotePath, change.LocalPath)
+					if err != nil {
+						errors <- &ErrProcessor{"Unable to update protected file", err}
+						failed <- change
+						break
+					}
+
+					// No cache entry yet, so we need to get it started
+					entry = NewCacheEntry(prot.Sync(),
+						prot.RemotePath(),
+						prot.LocalPath(),
+						prot.ContentHash(),
+						nil)
+				}
+
+				// Update file cache
+				entry.SetLocalHash(prot.ContentHash())
+				rHash, err := prot.RemoteHash()
+				if err != nil {
+					// Report error, but try to carry on. Maybe we'll at least get the local
+					// hash updated
+					errors <- &ErrProcessor{"Unable to update remote hash in database", err}
+				} else {
+					entry.SetRemoteHash(rHash)
+				}
+
+				if err = entry.Save(); err != nil {
+					errors <- &ErrProcessor{"Failed to update file cache", err}
+				}
+
+				// Regardless of issues updating our cache, we did extract the file correctly
+				completed <- change
 
 			case LocalDelete:
 				fallthrough
