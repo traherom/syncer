@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 )
@@ -49,7 +51,7 @@ type Change struct {
 
 // ChangeQueueManager establishes change processing workers and farms work out
 // to them as needed.
-func ChangeQueueManager(newChanges chan *Change, errors chan error, die chan bool) {
+func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, errors chan error, die chan bool) {
 	// Establish workers
 	var wg sync.WaitGroup
 	defer func() {
@@ -79,33 +81,59 @@ func ChangeQueueManager(newChanges chan *Change, errors chan error, die chan boo
 
 		row := sync.db.QueryRow("SELECT id, change_type, rel_local_path, rel_remote_path FROM change_queue WHERE processing=0 ORDER BY time_added ASC LIMIT 1")
 		err := row.Scan(&change.id, &change.ChangeType, &change.LocalPath, &change.RemotePath)
+		if err == sql.ErrNoRows {
+			// Nothing to do
+			return
+		}
 		if err != nil {
+			// Some issue occurred and we COULDN'T get any rows because of an error
 			errors <- &ErrProcessor{"Unable to retrieve next change", err}
 			return
 		}
 
-		_, err = sync.db.Exec("UPDATE change_queue SET processing=1 WHERE id=?", change.id)
-		if err != nil {
-			errors <- &ErrProcessor{"Unable to mark change as in-progress", err}
-			return
-		}
+		// If we aren't able to push the change to processing (everyone is busy),
+		// skip doing so. We'll push when one of them returns a change as completed.
+		select {
+		case todo <- change:
+			_, err = sync.db.Exec("UPDATE change_queue SET processing=1 WHERE id=?", change.id)
+			if err != nil {
+				errors <- &ErrProcessor{"Unable to mark change as in-progress", err}
+				return
+			}
 
-		todo <- change
+		default:
+			// Do nothing, will try again later
+		}
 	}
 
 	for {
 		// New change?
 		select {
 		case change := <-newChanges:
-			// TODO Should ignore?
+			// Should ignore?
+			if ignore, err := shouldIgnore(change); err != nil || ignore {
+				if err != nil {
+					errors <- err
+				}
+				fmt.Println("Ignored", change)
+				break
+			}
 
-			// TODO Check for conflict
-			//if conflictExists(change) {
-
-			//}
+			// Check for conflict
+			if conflict, err := conflictExists(change); err != nil || conflict {
+				// TODO conflict channel?
+				if err != nil {
+					errors <- err
+				}
+				fmt.Println("Conflict, skipping", change)
+				break
+			}
 
 			// Put in database
-			res, err := change.Sync.db.Exec("INSERT INTO change_queue (time_added, change_type, rel_local_path, rel_remote_path) VALUES (datetime('now'), ?, ?, ?)",
+			res, err := change.Sync.db.Exec(`INSERT INTO change_queue
+																					(time_added, change_type, rel_local_path, rel_remote_path)
+																				VALUES
+																					(datetime('now'), ?, ?, ?)`,
 				change.ChangeType, change.LocalPath, change.RemotePath)
 			if err != nil {
 				errors <- &ErrProcessor{"Unable to put change into database", err}
@@ -129,12 +157,14 @@ func ChangeQueueManager(newChanges chan *Change, errors chan error, die chan boo
 
 		case change := <-completed:
 			// Drop change from database
-			_, err := change.Sync.db.Exec("DELETE FROM change_queue WHERE id=? LIMIT 1", change.id)
+			_, err := change.Sync.db.Exec("DELETE FROM change_queue WHERE id=?", change.id)
 			if err != nil {
 				errors <- &ErrProcessor{"Error removing change from database", err}
 			}
 
 			pushOldestToProcessing(change.Sync)
+
+			completedChanges <- change
 
 		case <-die:
 			fmt.Println("Change queue manager quitting")
@@ -151,20 +181,16 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 	for {
 		select {
 		case change := <-incoming:
-			// TODO extract/encrypt as necessary and update entry in db
+			// Extract/encrypt as necessary and update entry in db
 			switch change.ChangeType {
 			case LocalAdd:
 				fallthrough
 			case LocalChange:
 				// Place/overwrite remote
-				if change.Sync == nil {
-					fmt.Println("sync is nil in change")
-					fmt.Printf("sync in processor: %#v\n", change)
-				}
 				entry, err := GetCacheEntryViaLocal(change.Sync, change.LocalPath)
-				if err != nil {
-					_ = "breakpoint"
-					fmt.Println("here", err)
+				if err != nil && err != sql.ErrNoRows {
+					errors <- err
+					break
 				}
 
 				var prot *Header
@@ -172,7 +198,7 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 					// Overwrite current entry
 					prot, err = OpenProtectedFile(change.Sync, entry.RemotePath())
 					if err != nil {
-						errors <- &ErrProcessor{"Unable to update protected file", err}
+						errors <- &ErrProcessor{"Unable to open protected file", err}
 						failed <- change
 						break
 					}
@@ -186,7 +212,7 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 					// New entry, so generate a remote path filename
 					remotePath, err := GetFreeRemotePath(change.Sync)
 					if err != nil {
-						errors <- err
+						errors <- &ErrProcessor{"Unable to get new free remote file name", err}
 						failed <- change
 						break
 					}
@@ -202,7 +228,7 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 					entry = NewCacheEntry(prot.Sync(),
 						prot.RemotePath(),
 						prot.LocalPath(),
-						prot.ContentHash(),
+						nil, // Going to set these just belowe (hashes)
 						nil)
 				}
 
@@ -212,7 +238,7 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 				if err != nil {
 					// Report error, but try to carry on. Maybe we'll at least get the local
 					// hash updated
-					errors <- &ErrProcessor{"Unable to update remote hash in database", err}
+					errors <- &ErrProcessor{"Unable to obtain remote hash from file", err}
 				} else {
 					entry.SetRemoteHash(rHash)
 				}
@@ -225,17 +251,112 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 				completed <- change
 
 			case LocalDelete:
-				fallthrough
+				// Delete the cache entry and remote file
+				entry, err := GetCacheEntryViaLocal(change.Sync, change.LocalPath)
+				if err != nil && err != sql.ErrNoRows {
+					errors <- &ErrProcessor{"Unable to get cache entry", nil}
+					failed <- change
+					break
+				}
+				if entry == nil {
+					// Report this as completed because we may have just not created the entry yet
+					// IE, maybe it was a short-lived temp file
+					errors <- &ErrProcessor{fmt.Sprintf("Local file %v deleted, but no remote found", change.LocalPath), nil}
+					completed <- change
+					break
+				}
+
+				if err = os.Remove(entry.AbsRemotePath()); err != nil {
+					errors <- &ErrProcessor{fmt.Sprintf("Removal of remote file %v failed", entry.AbsRemotePath()), err}
+				}
+				if err = entry.Delete(); err != nil {
+					errors <- &ErrProcessor{"Failed to remove cache entry", err}
+				}
+
+				completed <- change
+
 			case RemoteAdd:
 				fallthrough
 			case RemoteChange:
-				fallthrough
+				// Extract new contents
+				prot, err := OpenProtectedFile(change.Sync, change.RemotePath)
+				if err != nil {
+					errors <- &ErrProcessor{"Unable to open protected file", err}
+					failed <- change
+					break
+				}
+
+				if err = prot.ExtractContents(); err != nil {
+					errors <- &ErrProcessor{"Unable to write local file", err}
+					failed <- change
+					break
+				}
+
+				// Update/create cache entry
+				entry, err := GetCacheEntryViaRemote(change.Sync, change.RemotePath)
+				if err != nil && err != sql.ErrNoRows {
+					errors <- err
+					break
+				}
+
+				if entry == nil {
+					// No cache entry yet, so we need to get it started
+					entry = NewCacheEntry(prot.Sync(),
+						prot.RemotePath(),
+						prot.LocalPath(),
+						nil, // Going to set these below (hashes)
+						nil)
+				}
+
+				// Update file cache
+				entry.SetLocalHash(prot.ContentHash())
+				rHash, err := prot.RemoteHash()
+				if err != nil {
+					// Report error, but try to carry on. Maybe we'll at least get the local
+					// hash updated
+					errors <- &ErrProcessor{"Unable to obtain remote hash from file", err}
+				} else {
+					entry.SetRemoteHash(rHash)
+				}
+
+				if err = entry.Save(); err != nil {
+					errors <- &ErrProcessor{"Failed to update file cache", err}
+				}
+
+				// Regardless of issues updating our cache, we did extract the file correctly
+				completed <- change
+
 			case RemoteDelete:
-				break
+				// TODO almost identical to local delete
+				// Delete the cache entry and local file
+				entry, err := GetCacheEntryViaRemote(change.Sync, change.RemotePath)
+				if err != nil && err != sql.ErrNoRows {
+					errors <- &ErrProcessor{"Unable to get cache entry", nil}
+					failed <- change
+					break
+				}
+				if entry == nil {
+					// Report this as completed because we may have just not created the entry yet
+					// IE, maybe it was a short-lived temp file
+					errors <- &ErrProcessor{fmt.Sprintf("Remote file %v deleted, but no local found", change.RemotePath), nil}
+					completed <- change
+					break
+				}
+
+				if err = os.Remove(entry.AbsLocalPath()); err != nil {
+					errors <- &ErrProcessor{fmt.Sprintf("Removal of local file %v failed", entry.AbsRemotePath()), err}
+				}
+				if err = entry.Delete(); err != nil {
+					errors <- &ErrProcessor{"Failed to remove cache entry", err}
+				}
+
+				completed <- change
+
+			default:
+				errors <- &ErrProcessor{fmt.Sprintf("Change processor does not understand change type %v", change.ChangeType), nil}
+				failed <- change
 			}
 
-			// Return to ChangeQueueManager as completed or failed, as appropriate
-			//completed <- change
 		case <-die:
 			return
 		}
@@ -267,4 +388,80 @@ func PrepareChangeQueue(sync *SyncInfo) error {
 
 	_, err := sync.db.Exec(schema)
 	return err
+}
+
+func shouldIgnore(change *Change) (bool, error) {
+	var isLocal bool
+	var path string
+	switch change.ChangeType {
+	case LocalAdd:
+		fallthrough
+	case LocalChange:
+		fallthrough
+	case LocalDelete:
+		isLocal = true
+		path = change.LocalPath
+	case RemoteAdd:
+		fallthrough
+	case RemoteChange:
+		fallthrough
+	case RemoteDelete:
+		isLocal = false
+		path = change.RemotePath
+	default:
+		return false, &ErrProcessor{fmt.Sprintf("Unexpected change type %v in shouldIgnore", change.ChangeType), nil}
+	}
+
+	rows, err := change.Sync.db.Query(`SELECT id
+																			FROM temp_ignores
+																			WHERE expires > datetime('now') AND is_local=? AND rel_path=?
+																			LIMIT 1`,
+		isLocal, path)
+	if err == sql.ErrNoRows {
+		// TODO I'm not sure this case ever happens... I believe rows may
+		// always return and just be an empty result set
+		return false, nil
+	} else if err != nil {
+		return false, &ErrProcessor{"Unable to check ignore list", err}
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		// We must have found rows that match
+		return true, nil
+	}
+
+	return false, rows.Err()
+}
+
+func conflictExists(change *Change) (bool, error) {
+	rows, err := change.Sync.db.Query(`SELECT id, change_type, rel_local_path, rel_remote_path
+																						FROM change_queue
+																						WHERE rel_local_path=? OR rel_remote_path=?`,
+		change.LocalPath,
+		change.RemotePath)
+	if err == sql.ErrNoRows {
+		// TODO again, not sure if this can ever happen
+		return false, nil
+	} else if err != nil {
+		return true, &ErrProcessor{"Unable to get conflicts", err}
+	}
+	defer rows.Close()
+
+	// Check each possible conflict and decide best resolution
+	for rows.Next() {
+		var conflict Change
+		if err = rows.Scan(&conflict.id, &conflict.ChangeType, &conflict.LocalPath, &conflict.RemotePath); err != nil {
+			return true, &ErrProcessor{"Unable to scan possible conflict", err}
+		}
+
+		// TODO all conflicts and manage best resolution
+		// For now, skip the new change
+		return true, nil
+	}
+	if rows.Err(); err != nil {
+		return true, &ErrProcessor{"Unable to check conflicts", err}
+	}
+
+	return false, nil
 }

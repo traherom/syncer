@@ -46,11 +46,12 @@ func main() {
 	var wg sync.WaitGroup
 	die := make(chan bool)
 	changes := make(chan *Change)
+	completed := make(chan *Change)
 	errors := make(chan error)
 
 	wg.Add(1)
 	go func() {
-		ChangeQueueManager(changes, errors, die)
+		ChangeQueueManager(changes, completed, errors, die)
 		wg.Done()
 	}()
 
@@ -73,6 +74,8 @@ func main() {
 mainLoop:
 	for {
 		select {
+		case change := <-completed:
+			fmt.Println("Completed", change)
 		case err := <-errors:
 			fmt.Println("Error:", err)
 		case <-end:

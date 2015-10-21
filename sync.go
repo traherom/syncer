@@ -307,12 +307,9 @@ watchLoop:
 			newChange.Sync = s
 			newChange.LocalPath, err = filepath.Rel(s.LocalBase(), evt.Name)
 			if err != nil {
-				fmt.Printf("Unable to compute relative path for %v and %v\n", s.LocalBase(), evt.Name)
-				fmt.Println("Not handling event")
+				errors <- &ErrSync{fmt.Sprintf("Unable to compute relative path for %v and %v\n", s.LocalBase(), evt.Name), err}
 				continue
 			}
-
-			fmt.Printf("Sync is %#v when event was receive\n", newChange)
 
 			switch evt.Op {
 			case fsnotify.Create:
@@ -322,23 +319,21 @@ watchLoop:
 			case fsnotify.Write:
 				newChange.ChangeType = LocalChange
 			default:
-				panic(fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op))
+				errors <- &ErrSync{fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op), nil}
+				continue
 			}
-
-			fmt.Printf("Sync is %#v when event was receive\n", newChange)
 
 			// Get current remote path
 			if evt.Op != fsnotify.Create {
 				entry, err := GetCacheEntryViaLocal(s, newChange.LocalPath)
-				if err != nil {
-					fmt.Printf("Unable to get remote path for %v\n", newChange.LocalPath)
-				} else {
+				if err != nil && err != sql.ErrNoRows {
+					errors <- &ErrSync{fmt.Sprintf("Unable to get remote path for %v\n", newChange.LocalPath), err}
+				}
+				if entry != nil {
 					newChange.RemotePath = entry.RemotePath()
 					newChange.CacheEntry = entry
 				}
 			}
-
-			fmt.Printf("Sync is %#v when event was receive\n", newChange)
 
 			fmt.Println("Pushing local change:", newChange)
 			changes <- newChange
@@ -348,8 +343,7 @@ watchLoop:
 			newChange.Sync = s
 			newChange.RemotePath, err = filepath.Rel(s.RemoteBase(), evt.Name)
 			if err != nil {
-				fmt.Printf("Unable to compute relative path for %v and %v\n", s.RemoteBase(), evt.Name)
-				fmt.Println("Not handling event")
+				errors <- &ErrSync{fmt.Sprintf("Unable to compute relative path for %v and %v\n", s.RemoteBase(), evt.Name), err}
 				continue
 			}
 
@@ -361,15 +355,16 @@ watchLoop:
 			case fsnotify.Write:
 				newChange.ChangeType = RemoteChange
 			default:
-				panic(fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op))
+				errors <- &ErrSync{fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op), nil}
 			}
 
 			// Get current remote path
 			if evt.Op != fsnotify.Create {
 				entry, err := GetCacheEntryViaRemote(s, newChange.RemotePath)
-				if err != nil {
-					fmt.Printf("Unable to get remote path for %v\n", newChange.RemotePath)
-				} else {
+				if err != nil && err != sql.ErrNoRows {
+					errors <- &ErrSync{fmt.Sprintf("Unable to get local path for %v\n", newChange.RemotePath), err}
+				}
+				if entry != nil {
 					newChange.RemotePath = entry.RemotePath()
 					newChange.CacheEntry = entry
 				}

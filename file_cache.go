@@ -10,6 +10,20 @@ import (
 	"github.com/traherom/gocrypt"
 )
 
+// ErrCache is a universal error type for all sync issues
+type ErrCache struct {
+	msg   string // Error message
+	inner error  // Inner error that caused issue
+}
+
+func (e *ErrCache) Error() string {
+	if e.inner == nil {
+		return fmt.Sprintf("cache: %v", e.msg)
+	}
+
+	return fmt.Sprintf("cache: %v: %v", e.msg, e.inner.Error())
+}
+
 // CacheEntry is an copy of the information from the backing database in Sync
 type CacheEntry struct {
 	localPath  string       // Relative path of the unencrypted version of this file
@@ -17,7 +31,7 @@ type CacheEntry struct {
 	remoteHash gocrypt.Hash // Hash of the encrypted version of this file
 	localHash  gocrypt.Hash // Hash of the local version of this file
 	sync       *SyncInfo    // Sync this entry belongs to
-	id         int          // Id of this entry in the database. -1 if not yet inserted
+	id         int          // Id of this entry in the database. 0 if not yet inserted
 }
 
 // LocalPath returns the path to the local file relative to sync.LocalBase()
@@ -87,26 +101,31 @@ func NewCacheEntry(sync *SyncInfo, remotePath string, localPath string, localHas
 // by holders of the entry.
 func (e *CacheEntry) Save() error {
 	// Assume that if we have any ID that we just need to update
-	if e.id != -1 {
-		_, err := e.sync.db.Exec("UPDATE cache SET remote_hash=?, local_hash=? WHERE id=?",
-			e.remoteHash,
-			e.localHash,
+	if e.id > 0 {
+		res, err := e.sync.db.Exec("UPDATE cache SET remote_hash=?, local_hash=? WHERE id=?",
+			[]byte(e.remoteHash),
+			[]byte(e.localHash),
 			e.id)
-		return err
+		if err != nil {
+			return &ErrCache{"Unable to update cache entry", err}
+		} else if cnt, err := res.RowsAffected(); cnt != 1 {
+			return &ErrCache{fmt.Sprintf("Did not update one cache entry as expected (updated %v)", cnt), err}
+		}
+		return nil
 	}
 
 	res, err := e.sync.db.Exec("INSERT INTO cache (rel_remote_path, rel_local_path, remote_hash, local_hash) VALUES (?, ?, ?, ?)",
 		e.remotePath,
 		e.localPath,
-		e.remoteHash,
-		e.localHash)
+		[]byte(e.remoteHash),
+		[]byte(e.localHash))
 	if err != nil {
-		return err
+		return &ErrCache{"Unable to create new cache entry", err}
 	}
 
 	id, err := res.LastInsertId()
 	if err != nil {
-		return err
+		return &ErrCache{"Unable to retrieve new cache entry id", err}
 	}
 
 	e.id = int(id)
@@ -114,15 +133,24 @@ func (e *CacheEntry) Save() error {
 	return nil
 }
 
+// Delete removes the cache entry from the database.
+func (e *CacheEntry) Delete() error {
+	if e.id < 1 {
+		return &ErrCache{"Unable to delete, row id unknown or not inserted into database", nil}
+	}
+
+	res, err := e.sync.db.Exec("DELETE FROM cache WHERE id=?", e.id)
+	if err != nil {
+		return &ErrCache{"Unable to delete from cache", err}
+	} else if cnt, err := res.RowsAffected(); cnt != 1 {
+		return &ErrCache{fmt.Sprintf("Did not delete one cache entry as expected (updated %v)", cnt), err}
+	}
+
+	return nil
+}
+
 // GetCacheEntryViaLocal returns the file cache entry located via the relative local path given
 func GetCacheEntryViaLocal(s *SyncInfo, local string) (entry *CacheEntry, err error) {
-	_ = "breakpoint"
-	if s == nil {
-		fmt.Println("sync is nil")
-	}
-	if s.db == nil {
-		fmt.Println("db is nil")
-	}
 	row := s.db.QueryRow("SELECT id, rel_remote_path, rel_local_path, remote_hash, local_hash FROM cache WHERE rel_local_path=? LIMIT 1", local)
 	return scanToEntry(row)
 }
