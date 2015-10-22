@@ -12,7 +12,6 @@ import (
 func main() {
 	localDir := filepath.FromSlash("run/local")
 	remoteDir := filepath.FromSlash("run/remote")
-	fmt.Println(remoteDir, filepath.Separator, filepath.Dir(localDir))
 
 	var testSync *SyncInfo
 	if _, err := os.Stat(filepath.Dir(localDir)); err != nil {
@@ -64,11 +63,10 @@ func main() {
 
 	fmt.Println("Monitoring started, press <enter> to end")
 	end := make(chan bool)
-	go func() {
-		fmt.Scanln()
+	/*go func() {
 		fmt.Scanln()
 		close(end)
-	}()
+	}()*/
 
 	// UI interaction
 mainLoop:

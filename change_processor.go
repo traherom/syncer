@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"runtime"
 	"sync"
 )
 
@@ -63,7 +62,8 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 	todo := make(chan *Change)
 	failed := make(chan *Change)
 	completed := make(chan *Change)
-	for i := 0; i < runtime.NumCPU(); i++ {
+	//	for i := 0; i < runtime.NumCPU(); i++ {
+	for i := 0; i < 1; i++ {
 		fmt.Printf("Starting change processor %v\n", i+1)
 
 		wg.Add(1)

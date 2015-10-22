@@ -100,6 +100,7 @@ func NewCacheEntry(sync *SyncInfo, remotePath string, localPath string, localHas
 // Save pushes cache entry back to the database, commiting any changes made
 // by holders of the entry.
 func (e *CacheEntry) Save() error {
+	_ = "breakpoint"
 	// Assume that if we have any ID that we just need to update
 	if e.id > 0 {
 		res, err := e.sync.db.Exec("UPDATE cache SET remote_hash=?, local_hash=? WHERE id=?",
@@ -152,13 +153,25 @@ func (e *CacheEntry) Delete() error {
 // GetCacheEntryViaLocal returns the file cache entry located via the relative local path given
 func GetCacheEntryViaLocal(s *SyncInfo, local string) (entry *CacheEntry, err error) {
 	row := s.db.QueryRow("SELECT id, rel_remote_path, rel_local_path, remote_hash, local_hash FROM cache WHERE rel_local_path=? LIMIT 1", local)
-	return scanToEntry(row)
+	entry, err = scanToEntry(row)
+	if err != nil {
+		return nil, err
+	}
+
+	entry.sync = s
+	return
 }
 
 // GetCacheEntryViaRemote returns the file cache entry located via the relative local path given
 func GetCacheEntryViaRemote(s *SyncInfo, remote string) (entry *CacheEntry, err error) {
 	row := s.db.QueryRow("SELECT id, rel_remote_path, rel_local_path, remote_hash, local_hash FROM cache WHERE rel_remote_path=? LIMIT 1", remote)
-	return scanToEntry(row)
+	entry, err = scanToEntry(row)
+	if err != nil {
+		return nil, err
+	}
+
+	entry.sync = s
+	return
 }
 
 func scanToEntry(row *sql.Row) (*CacheEntry, error) {

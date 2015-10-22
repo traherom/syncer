@@ -88,7 +88,7 @@ func CreateProtectedFile(sync *SyncInfo, protFilePath string, localFilePath stri
 // OpenProtectedFile reads the header of the given protected file and returns the data
 // needed to work further with that file.
 func OpenProtectedFile(sync *SyncInfo, protFilePath string) (*Header, error) {
-	f, err := os.Open(protFilePath)
+	f, err := os.Open(filepath.Join(sync.RemoteBase(), protFilePath))
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +106,7 @@ func OpenProtectedFile(sync *SyncInfo, protFilePath string) (*Header, error) {
 	header.sync = sync
 	header.headerLen = int(encHeadLen)
 	header.remotePath = protFilePath
+	header.contentKeys = new(gocrypt.KeyCombo)
 
 	// Interpret
 	headBytes.Rewind()
@@ -125,9 +126,9 @@ func OpenProtectedFile(sync *SyncInfo, protFilePath string) (*Header, error) {
 		// 32 - hash of DECRYPTED contents
 		// 8 - length of Path
 		// <Variable> - local relative path
-		header.contentKeys.AuthKey, err = readKey(buf)
+		header.contentKeys.CryptoKey, err = readKey(buf)
 		if err != nil {
-			return nil, &ErrProtectedFile{"Unable to read auth key", err}
+			return nil, &ErrProtectedFile{"Unable to read crypto key", err}
 		}
 
 		header.contentKeys.AuthKey, err = readKey(buf)
