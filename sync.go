@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +13,18 @@ import (
 
 	"gopkg.in/fsnotify.v1"
 
+	"io/ioutil"
+
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver will register itself
 	"github.com/traherom/fsnotifydeep"
 	"github.com/traherom/gocrypt"
 	"github.com/traherom/gocrypt/aes"
+	"github.com/traherom/memstream"
+	"golang.org/x/crypto/pbkdf2"
 )
+
+// pbkdf2Iterations
+const pbkdf2Iterations = 100000
 
 // SyncInfo stores information common to all files in a given Sync
 type SyncInfo struct {
@@ -140,7 +150,12 @@ func CreateSync(localPath string, remotePath string, keys *gocrypt.KeyCombo) (sy
 
 	sync.keys = keys
 
-	sync.Set(remotePathKey, filepath.ToSlash(filepath.Clean(remotePath)))
+	remoteAbs, err := filepath.Abs(remotePath)
+	if err != nil {
+		return nil, &ErrSync{"Unable to determine absolute remote path", err}
+	}
+
+	sync.Set(remotePathKey, filepath.ToSlash(remoteAbs))
 	sync.Set(cryptoKeyKey, keys.CryptoKey.String())
 	sync.Set(authKeyKey, keys.AuthKey.String())
 
@@ -220,6 +235,101 @@ func (s *SyncInfo) RemoteBase() string {
 // Keys returns a copy of the keys for this sync's metadata
 func (s *SyncInfo) Keys() gocrypt.KeyCombo {
 	return *s.keys
+}
+
+// ExportKeys exports this sync's keys to the given path, protecting them with
+// the given password.
+func (s *SyncInfo) ExportKeys(outPath, pw string) error {
+	salt, err := gocrypt.SecureBytes(aes.KeyLength)
+	if err != nil {
+		return &ErrSync{"Unable to get salt for export", err}
+	}
+
+	exportKeys := generatePbkdf2KeyCombo(pw, salt)
+	fmt.Println("Salt:", salt)
+	fmt.Println("Export keys:", exportKeys)
+
+	origBuf := memstream.New()
+	origBuf.Write(s.Keys().CryptoKey)
+	origBuf.Write(s.Keys().AuthKey)
+	origBuf.Rewind()
+
+	encryptedBuf := memstream.New()
+	encryptedBuf.Write(salt)
+	_, _, err = aes.Encrypt(origBuf, encryptedBuf, exportKeys)
+	if err != nil {
+		return &ErrSync{"Unable to encrypt keys", err}
+	}
+
+	fmt.Println("Pre-encoding:", encryptedBuf.Bytes())
+	encoded := gocrypt.BytesToB64(encryptedBuf.Bytes())
+	err = ioutil.WriteFile(outPath, []byte(encoded), 0770)
+	if err != nil {
+		return &ErrSync{"Unable to open key file", err}
+	}
+
+	return nil
+}
+
+// ImportKeys imports the keys from the given file, replacing the current keys for this sync
+func (s *SyncInfo) ImportKeys(inPath, pw string) error {
+	encoded, err := ioutil.ReadFile(inPath)
+	if err != nil {
+		return &ErrSync{"Unable to open key file", err}
+	}
+
+	encrypted, err := gocrypt.BytesFromB64(string(encoded))
+	if err != nil {
+		return &ErrSync{"Unable to decode key file", err}
+	}
+	fmt.Println("Post-decoding:", encrypted)
+
+	salt := encrypted[:aes.KeyLength]
+	exportKeys := generatePbkdf2KeyCombo(pw, salt)
+	fmt.Println("Salt:", salt)
+	fmt.Println("Export keys:", exportKeys)
+
+	decrypted := memstream.New()
+	_, cnt, err := aes.Decrypt(bytes.NewBuffer(encrypted[aes.KeyLength:]), decrypted, exportKeys)
+	if err != nil {
+		return &ErrSync{"Unable to decrypt keys", err}
+	}
+
+	if cnt != int64(aes.KeyLength*2) {
+		return &ErrSync{"Keys read, but do not appear to be the correct format", nil}
+	}
+
+	decrypted.Rewind()
+
+	cryptoKey := gocrypt.Key(make([]byte, aes.KeyLength))
+	var read int
+	if read, err = decrypted.Read(cryptoKey); err != nil && err != io.EOF {
+		return &ErrSync{"Failed to read crypto key", err}
+	}
+	cryptoKey = cryptoKey[:read]
+
+	authKey := gocrypt.Key(make([]byte, aes.KeyLength))
+	if read, err = decrypted.Read(authKey); err != nil && err != io.EOF {
+		return &ErrSync{"Failed to read auth key", err}
+	}
+	authKey = authKey[:read]
+
+	if len(cryptoKey) != aes.KeyLength || len(authKey) != aes.KeyLength {
+		return &ErrSync{"Keys read, but they do not appear to be long enough", nil}
+	}
+
+	s.Set(cryptoKeyKey, cryptoKey.String())
+	s.Set(authKeyKey, authKey.String())
+
+	return nil
+}
+
+func generatePbkdf2KeyCombo(pw string, salt []byte) *gocrypt.KeyCombo {
+	key := pbkdf2.Key([]byte(pw), salt, pbkdf2Iterations, aes.KeyLength*2, sha256.New)
+	return &gocrypt.KeyCombo{
+		CryptoKey: key[:aes.KeyLength],
+		AuthKey:   key[aes.KeyLength:],
+	}
 }
 
 // Get retrieves the named setting from the database or "" if it cannot be found.
