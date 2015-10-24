@@ -203,7 +203,15 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 						break
 					}
 
-					if err = prot.Write(); err != nil {
+					ignoreId, err := addIgnore(change.Sync, false, entry.RemotePath())
+					if err != nil {
+						errors <- err
+					}
+
+					err = prot.Write()
+					removeIgnore(change.Sync, ignoreId)
+
+					if err != nil {
 						errors <- &ErrProcessor{"Unable to write to protected file", err}
 						failed <- change
 						break
@@ -217,7 +225,14 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 						break
 					}
 
+					ignoreId, err := addIgnore(change.Sync, false, remotePath)
+					if err != nil {
+						errors <- err
+					}
+
 					prot, err = CreateProtectedFile(change.Sync, remotePath, change.LocalPath)
+					removeIgnore(change.Sync, ignoreId)
+
 					if err != nil {
 						errors <- &ErrProcessor{"Unable to update protected file", err}
 						failed <- change
@@ -363,31 +378,25 @@ func changeProcessor(incoming chan *Change, failed chan *Change, completed chan 
 	}
 }
 
-// PrepareChangeQueue readies the given sync for use with the change queue manager, including establishing
-// the database schema and ensuring the queue is currently empty.
-func PrepareChangeQueue(sync *SyncInfo) error {
-	schema := `
-	  CREATE TABLE IF NOT EXISTS change_queue (id INTEGER PRIMARY KEY,
-				                                     time_added DATETIME DEFAULT current_timestamp,
-				                                     change_type INTEGER NOT NULL,
-				                                     rel_local_path TEXT DEFAULT NULL,
-				                                     rel_remote_path TEXT DEFAULT NULL,
-				                                     processing BOOLEAN DEFAULT 0);
-	  CREATE INDEX IF NOT EXISTS change_lp ON change_queue (rel_local_path);
-	  CREATE INDEX IF NOT EXISTS change_rp ON change_queue (rel_remote_path);
-	  CREATE INDEX IF NOT EXISTS change_time ON change_queue (time_added);
+func addIgnore(sync *SyncInfo, isLocal bool, relPath string) (id int64, err error) {
+	res, err := sync.db.Exec(`INSERT INTO temp_ignores
+												(expires, is_local, rel_path)
+												VALUES
+												(datetime("now", "+1 minute"), ?, ?)`, isLocal, relPath)
+	if err != nil {
+		return 0, &ErrProcessor{"Unable to add ignore", err}
+	}
 
-	  CREATE TABLE IF NOT EXISTS temp_ignores (id INTEGER PRIMARY KEY,
-											                       expires INT8 NOT NULL,
-										                         is_local BOOLEAN NOT NULL,
-										                         rel_path TEXT NOT NULL);
+	return res.LastInsertId()
+}
 
-	  DELETE FROM change_queue;
-	  DELETE FROM temp_ignores;
-	`
+func removeIgnore(sync *SyncInfo, id int64) error {
+	_, err := sync.db.Exec("DELETE FROM temp_ignores WHERE id=?", id)
+	if err != nil {
+		return &ErrProcessor{"Failed to remove ignore", err}
+	}
 
-	_, err := sync.db.Exec(schema)
-	return err
+	return nil
 }
 
 func shouldIgnore(change *Change) (bool, error) {
@@ -464,4 +473,31 @@ func conflictExists(change *Change) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// PrepareChangeQueue readies the given sync for use with the change queue manager, including establishing
+// the database schema and ensuring the queue is currently empty.
+func PrepareChangeQueue(sync *SyncInfo) error {
+	schema := `
+	  CREATE TABLE IF NOT EXISTS change_queue (id INTEGER PRIMARY KEY,
+				                                     time_added DATETIME DEFAULT current_timestamp,
+				                                     change_type INTEGER NOT NULL,
+				                                     rel_local_path TEXT DEFAULT NULL,
+				                                     rel_remote_path TEXT DEFAULT NULL,
+				                                     processing BOOLEAN DEFAULT 0);
+	  CREATE INDEX IF NOT EXISTS change_lp ON change_queue (rel_local_path);
+	  CREATE INDEX IF NOT EXISTS change_rp ON change_queue (rel_remote_path);
+	  CREATE INDEX IF NOT EXISTS change_time ON change_queue (time_added);
+
+	  CREATE TABLE IF NOT EXISTS temp_ignores (id INTEGER PRIMARY KEY,
+											                       expires INT8 NOT NULL,
+										                         is_local BOOLEAN NOT NULL,
+										                         rel_path TEXT NOT NULL);
+
+	  DELETE FROM change_queue;
+	  DELETE FROM temp_ignores;
+	`
+
+	_, err := sync.db.Exec(schema)
+	return err
 }

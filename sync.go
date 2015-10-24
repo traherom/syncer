@@ -246,8 +246,6 @@ func (s *SyncInfo) ExportKeys(outPath, pw string) error {
 	}
 
 	exportKeys := generatePbkdf2KeyCombo(pw, salt)
-	fmt.Println("Salt:", salt)
-	fmt.Println("Export keys:", exportKeys)
 
 	origBuf := memstream.New()
 	origBuf.Write(s.Keys().CryptoKey)
@@ -261,7 +259,6 @@ func (s *SyncInfo) ExportKeys(outPath, pw string) error {
 		return &ErrSync{"Unable to encrypt keys", err}
 	}
 
-	fmt.Println("Pre-encoding:", encryptedBuf.Bytes())
 	encoded := gocrypt.BytesToB64(encryptedBuf.Bytes())
 	err = ioutil.WriteFile(outPath, []byte(encoded), 0770)
 	if err != nil {
@@ -282,12 +279,9 @@ func (s *SyncInfo) ImportKeys(inPath, pw string) error {
 	if err != nil {
 		return &ErrSync{"Unable to decode key file", err}
 	}
-	fmt.Println("Post-decoding:", encrypted)
 
 	salt := encrypted[:aes.KeyLength]
 	exportKeys := generatePbkdf2KeyCombo(pw, salt)
-	fmt.Println("Salt:", salt)
-	fmt.Println("Export keys:", exportKeys)
 
 	decrypted := memstream.New()
 	_, cnt, err := aes.Decrypt(bytes.NewBuffer(encrypted[aes.KeyLength:]), decrypted, exportKeys)
