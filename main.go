@@ -8,6 +8,7 @@ import (
 
 	"github.com/codegangsta/cli"
 	"github.com/traherom/gocrypt/aes"
+	"github.com/traherom/syncer/core"
 )
 
 func main() {
@@ -113,7 +114,7 @@ func initSync(c *cli.Context) {
 		return
 	}
 
-	_, err = CreateSync(localDir, remoteDir, keys)
+	_, err = core.CreateSync(localDir, remoteDir, keys)
 	if err != nil {
 		fmt.Printf("Failed to create sync: %v\n", err)
 		return
@@ -130,7 +131,7 @@ func monitorSync(c *cli.Context) {
 	}
 
 	fmt.Println("Loading sync")
-	sync, err := LoadSync(localDir)
+	sync, err := core.LoadSync(localDir)
 	if err != nil {
 		fmt.Printf("Failed to load sync: %v\n", err)
 		return
@@ -139,13 +140,13 @@ func monitorSync(c *cli.Context) {
 	// Change processor
 	var wg syncPkg.WaitGroup
 	die := make(chan bool)
-	changes := make(chan *Change)
-	completed := make(chan *Change)
+	changes := make(chan *core.Change)
+	completed := make(chan *core.Change)
 	errors := make(chan error)
 
 	wg.Add(1)
 	go func() {
-		ChangeQueueManager(changes, completed, errors, die)
+		core.ChangeQueueManager(changes, completed, errors, die)
 		wg.Done()
 	}()
 
@@ -200,7 +201,7 @@ func exportKeys(c *cli.Context) {
 	}
 
 	fmt.Println("Loading sync")
-	sync, err := LoadSync(localDir)
+	sync, err := core.LoadSync(localDir)
 	if err != nil {
 		fmt.Printf("Failed to load sync: %v\n", err)
 		return
@@ -235,7 +236,7 @@ func importKeys(c *cli.Context) {
 	}
 
 	fmt.Println("Loading sync")
-	sync, err := LoadSync(localDir)
+	sync, err := core.LoadSync(localDir)
 	if err != nil {
 		fmt.Printf("Failed to load sync: %v\n", err)
 		return
