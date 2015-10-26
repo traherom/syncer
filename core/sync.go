@@ -33,7 +33,8 @@ type SyncInfo struct {
 	keys       *gocrypt.KeyCombo // Crypto and auth keys for protected file headers
 
 	// Runtime-specific info
-	db *sql.DB // Connection to sync SQLite database
+	db           *sql.DB   // Connection to sync SQLite database
+	changesReady chan bool // If a user believes the sync has changes waiting to be processed, they should signal via this channel
 }
 
 // ErrSync is a universal error type for all sync issues
@@ -78,6 +79,7 @@ func LoadSync(localPath string) (*SyncInfo, error) {
 	// Load remainder of settings
 	sync := new(SyncInfo)
 	sync.db = db
+	sync.changesReady = make(chan bool)
 
 	if sync.localBase, err = filepath.Abs(localPath); err != nil {
 		return nil, &ErrSync{"Unable to get absolute local path", err}
@@ -141,6 +143,8 @@ func CreateSync(localPath string, remotePath string, keys *gocrypt.KeyCombo) (sy
 	// Initial settings
 	sync = new(SyncInfo)
 	sync.db = db
+	sync.changesReady = make(chan bool)
+
 	if sync.localBase, err = filepath.Abs(localPath); err != nil {
 		return nil, &ErrSync{"Unable to get absolute local path", err}
 	}
@@ -193,6 +197,10 @@ func (s *SyncInfo) sanityCheckConfig() error {
 	}
 
 	return nil
+}
+
+func (s *SyncInfo) ProcessChange() {
+	s.changesReady <- true
 }
 
 // Creates database schema as needed
@@ -408,8 +416,8 @@ watchLoop:
 		select {
 		case evt := <-localWatcher.Events:
 			newChange := new(Change)
-			newChange.Sync = s
-			newChange.LocalPath, err = filepath.Rel(s.LocalBase(), evt.Name)
+			newChange.sync = s
+			newChange.localPath, err = filepath.Rel(s.LocalBase(), evt.Name)
 			if err != nil {
 				errors <- &ErrSync{fmt.Sprintf("Unable to compute relative path for %v and %v\n", s.LocalBase(), evt.Name), err}
 				continue
@@ -417,11 +425,11 @@ watchLoop:
 
 			switch evt.Op {
 			case fsnotify.Create:
-				newChange.ChangeType = LocalAdd
+				newChange.changeType = LocalAdd
 			case fsnotify.Remove:
-				newChange.ChangeType = LocalDelete
+				newChange.changeType = LocalDelete
 			case fsnotify.Write:
-				newChange.ChangeType = LocalChange
+				newChange.changeType = LocalChange
 			default:
 				errors <- &ErrSync{fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op), nil}
 				continue
@@ -429,13 +437,13 @@ watchLoop:
 
 			// Get current remote path
 			if evt.Op != fsnotify.Create {
-				entry, err := GetCacheEntryViaLocal(s, newChange.LocalPath)
+				entry, err := GetCacheEntryViaLocal(s, newChange.localPath)
 				if err != nil && err != sql.ErrNoRows {
-					errors <- &ErrSync{fmt.Sprintf("Unable to get remote path for %v\n", newChange.LocalPath), err}
+					errors <- &ErrSync{fmt.Sprintf("Unable to get remote path for %v\n", newChange.localPath), err}
 				}
 				if entry != nil {
-					newChange.RemotePath = entry.RemotePath()
-					newChange.CacheEntry = entry
+					newChange.remotePath = entry.RemotePath()
+					newChange.cacheEntry = entry
 				}
 			}
 
@@ -444,8 +452,8 @@ watchLoop:
 
 		case evt := <-remoteWatcher.Events:
 			newChange := new(Change)
-			newChange.Sync = s
-			newChange.RemotePath, err = filepath.Rel(s.RemoteBase(), evt.Name)
+			newChange.sync = s
+			newChange.remotePath, err = filepath.Rel(s.RemoteBase(), evt.Name)
 			if err != nil {
 				errors <- &ErrSync{fmt.Sprintf("Unable to compute relative path for %v and %v\n", s.RemoteBase(), evt.Name), err}
 				continue
@@ -453,24 +461,24 @@ watchLoop:
 
 			switch evt.Op {
 			case fsnotify.Create:
-				newChange.ChangeType = RemoteAdd
+				newChange.changeType = RemoteAdd
 			case fsnotify.Remove:
-				newChange.ChangeType = RemoteDelete
+				newChange.changeType = RemoteDelete
 			case fsnotify.Write:
-				newChange.ChangeType = RemoteChange
+				newChange.changeType = RemoteChange
 			default:
 				errors <- &ErrSync{fmt.Sprintf("fsnotify event type %v should have been filtered", evt.Op), nil}
 			}
 
 			// Get current remote path
 			if evt.Op != fsnotify.Create {
-				entry, err := GetCacheEntryViaRemote(s, newChange.RemotePath)
+				entry, err := GetCacheEntryViaRemote(s, newChange.remotePath)
 				if err != nil && err != sql.ErrNoRows {
-					errors <- &ErrSync{fmt.Sprintf("Unable to get local path for %v\n", newChange.RemotePath), err}
+					errors <- &ErrSync{fmt.Sprintf("Unable to get local path for %v\n", newChange.remotePath), err}
 				}
 				if entry != nil {
-					newChange.RemotePath = entry.RemotePath()
-					newChange.CacheEntry = entry
+					newChange.remotePath = entry.RemotePath()
+					newChange.cacheEntry = entry
 				}
 			}
 
