@@ -9,6 +9,7 @@ import (
 	"github.com/codegangsta/cli"
 	"github.com/traherom/gocrypt/aes"
 	"github.com/traherom/syncer/core"
+	"log"
 )
 
 func main() {
@@ -99,15 +100,15 @@ func initSync(c *cli.Context) {
 
 	// Command check
 	if localDir == "" {
-		fmt.Println("Local directory must be set to create sync")
+		log.Println("Local directory must be set to create sync")
 		return
 	}
 	if remoteDir == "" {
-		fmt.Println("Remote directory must be set to create sync")
+		log.Println("Remote directory must be set to create sync")
 		return
 	}
 
-	fmt.Println("Creating sync")
+	log.Println("Creating sync")
 	keys, err := aes.NewKeyCombo()
 	if err != nil {
 		fmt.Printf("Failed to create keys for new sync: %v\n", err)
@@ -126,11 +127,11 @@ func monitorSync(c *cli.Context) {
 
 	// Command check
 	if localDir == "" {
-		fmt.Println("Local directory must be set to monitor")
+		log.Println("Local directory must be set to monitor")
 		return
 	}
 
-	fmt.Println("Loading sync")
+	log.Println("Loading sync")
 	sync, err := core.LoadSync(localDir)
 	if err != nil {
 		fmt.Printf("Failed to load sync: %v\n", err)
@@ -157,7 +158,7 @@ func monitorSync(c *cli.Context) {
 		wg.Done()
 	}()
 
-	fmt.Println("Monitoring started, press <enter> to end")
+	log.Println("Monitoring started, press <enter> to end")
 	end := make(chan bool)
 	/*go func() {
 		fmt.Scanln()
@@ -169,19 +170,19 @@ mainLoop:
 	for {
 		select {
 		case change := <-completed:
-			fmt.Println("Completed", change)
+			log.Println("Completed", change)
 		case err := <-errors:
-			fmt.Println("Error:", err)
+			log.Println("Error:", err)
 		case <-end:
 			break mainLoop
 		}
 	}
 
 	// TODO timeout on waiting?
-	fmt.Println("Requesting that handlers close")
+	log.Println("Requesting that handlers close")
 	close(die)
 	wg.Wait()
-	fmt.Println("Syncer ended cleanly")
+	log.Println("Syncer ended cleanly")
 }
 
 func exportKeys(c *cli.Context) {
@@ -192,15 +193,15 @@ func exportKeys(c *cli.Context) {
 
 	// Command check
 	if localDir == "" {
-		fmt.Println("Local directory must be set to export keys")
+		log.Println("Local directory must be set to export keys")
 		return
 	}
 	if password == "" {
-		fmt.Println("Password to protect keys with must be given")
+		log.Println("Password to protect keys with must be given")
 		return
 	}
 
-	fmt.Println("Loading sync")
+	log.Println("Loading sync")
 	sync, err := core.LoadSync(localDir)
 	if err != nil {
 		fmt.Printf("Failed to load sync: %v\n", err)
@@ -212,11 +213,11 @@ func exportKeys(c *cli.Context) {
 	}
 
 	if err := sync.ExportKeys(outPath, password); err != nil {
-		fmt.Println("Export failed:", err)
+		log.Println("Export failed:", err)
 		return
 	}
 
-	fmt.Println("Keys exported to", outPath)
+	log.Println("Keys exported to", outPath)
 }
 
 func importKeys(c *cli.Context) {
@@ -227,15 +228,15 @@ func importKeys(c *cli.Context) {
 
 	// Command check
 	if localDir == "" {
-		fmt.Println("Local directory must be set to import keys")
+		log.Println("Local directory must be set to import keys")
 		return
 	}
 	if password == "" {
-		fmt.Println("Password to decrypt keys with must be given")
+		log.Println("Password to decrypt keys with must be given")
 		return
 	}
 
-	fmt.Println("Loading sync")
+	log.Println("Loading sync")
 	sync, err := core.LoadSync(localDir)
 	if err != nil {
 		fmt.Printf("Failed to load sync: %v\n", err)
@@ -247,9 +248,9 @@ func importKeys(c *cli.Context) {
 	}
 
 	if err := sync.ImportKeys(inPath, password); err != nil {
-		fmt.Println("Import failed:", err)
+		log.Println("Import failed:", err)
 		return
 	}
 
-	fmt.Println("Keys imported from", inPath)
+	log.Println("Keys imported from", inPath)
 }

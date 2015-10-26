@@ -50,6 +50,6 @@ func TestCreateLoadSync(t *testing.T) {
 
 func cleanup() {
 	if err := os.RemoveAll(filepath.Dir(localDir)); err != nil {
-		fmt.Println("Unable to cleanup:", err)
+		log.Println("Unable to cleanup:", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,9 +381,9 @@ func (s *SyncInfo) Set(name string, value string) (previous string, err error) {
 func (s *SyncInfo) Monitor(changes chan *Change, errors chan error, die chan bool) {
 	var wg sync.WaitGroup
 	defer func() {
-		fmt.Println("Waiting for all monitor subprocessors to end")
+		log.Println("Waiting for all monitor subprocessors to end")
 		wg.Wait()
-		fmt.Println("All monitoring ended")
+		log.Println("All monitoring ended")
 	}()
 
 	// Ensure we're ready for the change processor
@@ -391,14 +392,14 @@ func (s *SyncInfo) Monitor(changes chan *Change, errors chan error, die chan boo
 	// Monitor for new changes anywhere in tree
 	localWatcher, err := watcherForDir(s.LocalBase())
 	if err != nil {
-		fmt.Printf("Unable to start filesystem monitor: %v\n", err)
+		log.Printf("Unable to start filesystem monitor: %v\n", err)
 		return
 	}
 	defer localWatcher.Close()
 
 	remoteWatcher, err := watcherForDir(s.RemoteBase())
 	if err != nil {
-		fmt.Printf("Unable to start filesystem monitor: %v\n", err)
+		log.Printf("Unable to start filesystem monitor: %v\n", err)
 		return
 	}
 	defer remoteWatcher.Close()
@@ -447,7 +448,7 @@ watchLoop:
 				}
 			}
 
-			fmt.Println("Pushing local change:", newChange)
+			log.Println("Pushing local change:", newChange)
 			changes <- newChange
 
 		case evt := <-remoteWatcher.Events:
@@ -482,19 +483,19 @@ watchLoop:
 				}
 			}
 
-			fmt.Println("Pushing remote change:", newChange)
+			log.Println("Pushing remote change:", newChange)
 			changes <- newChange
 
 		case err := <-localWatcher.Errors:
-			fmt.Println("Error during monitoring local:", err)
+			log.Println("Error during monitoring local:", err)
 		case err := <-remoteWatcher.Errors:
-			fmt.Println("Error during monitoring remote:", err)
+			log.Println("Error during monitoring remote:", err)
 		case <-die:
 			break watchLoop
 		}
 	}
 
-	fmt.Printf("Monitor for %v quitting\n", s.LocalBase())
+	log.Printf("Monitor for %v quitting\n", s.LocalBase())
 }
 
 // initialScan looks for changes that have occured since the last time

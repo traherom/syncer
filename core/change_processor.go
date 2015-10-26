@@ -3,6 +3,7 @@ package core
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -56,12 +57,12 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 	// Establish workers
 	var wg sync.WaitGroup
 	defer func() {
-		fmt.Println("Waiting for all processors to end")
+		log.Println("Waiting for all processors to end")
 		wg.Wait()
-		fmt.Println("All processors ended")
-		fmt.Println("Change queue manager quitting")
+		log.Println("All processors ended")
+		log.Println("Change queue manager quitting")
 	}()
-	fmt.Println("Change queue manager started")
+	log.Println("Change queue manager started")
 
 	todo := make(chan *Change)
 	failed := make(chan *Change)
@@ -81,7 +82,7 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 		// put a new item from that sync into the processing channel
 		select {
 		case change := <-newChanges:
-			fmt.Println("Got change", change)
+			log.Println("Got change", change)
 			if err := queueChange(change); err != nil {
 				errors <- err
 				break
@@ -101,7 +102,7 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 				changePusher(change.sync, todo, errors, die)
 			}
 
-			fmt.Println("calling process change")
+			log.Println("calling process change")
 			change.sync.ProcessChange()
 
 		case change := <-failed:
@@ -131,9 +132,9 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 // Closing the input channel OR the die channel will end the pusher.
 func changePusher(sync *SyncInfo, processingChannel chan *Change, errors chan error, die chan bool) {
 	defer func() {
-		fmt.Printf("Stopping queue watcher for %v\n", sync.LocalBase())
+		log.Printf("Stopping queue watcher for %v\n", sync.LocalBase())
 	}()
-	fmt.Printf("Starting queue watcher for %v\n", sync.LocalBase())
+	log.Printf("Starting queue watcher for %v\n", sync.LocalBase())
 
 	tick := time.Tick(30 * time.Second)
 	for {
@@ -149,7 +150,7 @@ func changePusher(sync *SyncInfo, processingChannel chan *Change, errors chan er
 			return
 		}
 
-		fmt.Println("Getting ready to push next change")
+		log.Println("Getting ready to push next change")
 		pushNextChange(sync, processingChannel, errors, die)
 	}
 }
@@ -194,11 +195,11 @@ func pushNextChange(sync *SyncInfo, processingChannel chan *Change, errors chan 
 	}
 
 	// Try to push for a bit, then give up
-	fmt.Println("Got change, trying to push", change)
+	log.Println("Got change, trying to push", change)
 	timeout := time.After(5 * time.Second)
 	select {
 	case processingChannel <- change:
-		fmt.Println("Pushed", change)
+		log.Println("Pushed", change)
 		_, err = change.sync.db.Exec("UPDATE change_queue SET processing=1 WHERE id=?", change.id)
 		if err != nil {
 			errors <- &ErrProcessor{"Unable to mark change as in-progress", err}
@@ -218,7 +219,7 @@ func queueChange(change *Change) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println("Ignored", change)
+		log.Println("Ignored", change)
 		return nil
 	}
 
@@ -229,7 +230,7 @@ func queueChange(change *Change) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println("Conflict, skipping", change)
+		log.Println("Conflict, skipping", change)
 		return nil
 	}
 
@@ -247,9 +248,9 @@ func queueChange(change *Change) error {
 
 func changeProcessor(incoming chan *Change, completed chan *Change, failed chan *Change, errors chan error, die chan bool) {
 	defer func() {
-		fmt.Println("Change processor quitting")
+		log.Println("Change processor quitting")
 	}()
-	fmt.Println("Change processor starting")
+	log.Println("Change processor starting")
 
 	for {
 		select {
