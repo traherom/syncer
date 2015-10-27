@@ -221,7 +221,8 @@ func initDbSchema(db *sql.DB) error {
 						                        rel_remote_path TEXT NOT NULL,
 						                        remote_hash BLOB NOT NULL,
 						                        local_hash BLOB NOT NULL,
-						                        seen_in_search BOOLEAN NOT NULL DEFAULT 0);
+						                        unseen_local BOOLEAN NOT NULL DEFAULT 0,
+						                        unseen_remote BOOLEAN NOT NULL DEFAULT 0);
 	`
 
 	_, err := db.Exec(schema)
@@ -413,7 +414,7 @@ func (s *SyncInfo) Monitor(changes chan *Change, errors chan error, die chan boo
 	// Scan for changes since last run
 	wg.Add(1)
 	go func() {
-		s.initialScan(changes, childDie)
+		s.initialScan(changes, errors, childDie)
 		wg.Done()
 	}()
 
@@ -504,8 +505,146 @@ watchLoop:
 
 // initialScan looks for changes that have occured since the last time
 // this sync was monitored
-func (s *SyncInfo) initialScan(changes chan *Change, die chan bool) {
+func (s *SyncInfo) initialScan(changes chan *Change, errors chan error, die chan bool) {
+	if err := s.MarkAllEntriesUnseen(); err != nil {
+		errors <- err
+		return
+	}
 
+	var wg sync.WaitGroup
+
+	// Scan local
+	wg.Add(1)
+	go func() {
+		filepath.Walk(s.LocalBase(), func(path string, info os.FileInfo, err error) error {
+			if strings.Contains(path, ".syncer") {
+				return nil
+			}
+			if info.IsDir() {
+				return nil
+			}
+
+			path, err = filepath.Rel(s.LocalBase(), path)
+			if err != nil {
+				realErr := &ErrSync{"Unable to get relative path during initial scan", err}
+				errors <- realErr
+				return realErr
+			}
+
+			entry, err := GetCacheEntryViaLocal(s, path)
+			if err == sql.ErrNoRows {
+				// New local file
+				changes <- &Change{
+					localPath:  path,
+					changeType: LocalAdd,
+					sync:       s,
+				}
+				return nil
+			} else if err != nil {
+				// Any other error means a real issue
+				errors <- &ErrSync{"Error during initial scan", err}
+				return nil
+			}
+
+			if err = entry.MarkLocalSeen(); err != nil {
+				errors <- err
+			}
+
+			// Is it changed? TODO
+
+			return nil
+		})
+
+		// If we didn't see a file, that means it was removed
+		unseen, err := s.GetUnseenLocalEntries()
+		if err != nil {
+			errors <- &ErrSync{"Unable to check for unseen entries", err}
+			return
+		}
+
+		for el := unseen.Front(); el != nil; el = el.Next() {
+			e, ok := el.Value.(*CacheEntry)
+			if !ok {
+				panic("GetUnseenLocalEntries returned a non-CacheEntry value")
+			}
+
+			changes <- &Change{
+				localPath:  e.LocalPath(),
+				remotePath: e.RemotePath(),
+				cacheEntry: e,
+				changeType: LocalDelete,
+				sync:       s,
+			}
+		}
+
+		wg.Done()
+	}()
+
+	// Scan remote
+	wg.Add(1)
+	go func() {
+		filepath.Walk(s.LocalBase(), func(path string, info os.FileInfo, err error) error {
+			if !strings.HasSuffix(path, ProtFileExt) {
+				return nil
+			}
+
+			path, err = filepath.Rel(s.RemoteBase(), path)
+			if err != nil {
+				realErr := &ErrSync{"Unable to get relative path during initial scan", err}
+				errors <- realErr
+				return realErr
+			}
+
+			entry, err := GetCacheEntryViaRemote(s, path)
+			if err == sql.ErrNoRows {
+				// New remote file
+				changes <- &Change{
+					remotePath: path,
+					changeType: RemoteAdd,
+					sync:       s,
+				}
+				return nil
+			} else if err != nil {
+				// Any other error means a real issue
+				errors <- &ErrSync{"Error during initial scan", err}
+				return nil
+			}
+
+			if err = entry.MarkRemoteSeen(); err != nil {
+				errors <- err
+			}
+
+			// Is it changed? TODO
+
+			return nil
+		})
+
+		// If we didn't see a file, that means it was removed
+		unseen, err := s.GetUnseenRemoteEntries()
+		if err != nil {
+			errors <- &ErrSync{"Unable to check for unseen entries", err}
+			return
+		}
+
+		for el := unseen.Front(); el != nil; el = el.Next() {
+			e, ok := el.Value.(*CacheEntry)
+			if !ok {
+				panic("GetUnseenRemoteEntries returned a non-CacheEntry value")
+			}
+
+			changes <- &Change{
+				localPath:  e.LocalPath(),
+				remotePath: e.RemotePath(),
+				cacheEntry: e,
+				changeType: RemoteDelete,
+				sync:       s,
+			}
+		}
+
+		wg.Done()
+	}()
+
+	wg.Wait()
 }
 
 // Clean removes unneeded temp files, database entries, etc from the sync

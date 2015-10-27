@@ -127,7 +127,6 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 		// put a new item from that sync into the processing channel
 		select {
 		case change := <-newChanges:
-			log.Printf("%#v", change.cacheEntry)
 			if err := queueChange(change); err != nil {
 				errors <- err
 				break

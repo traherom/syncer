@@ -108,7 +108,7 @@ func initSync(c *cli.Context) {
 		return
 	}
 
-	log.Println("Creating sync")
+	log.Printf("Creating sync %v <-> %v\n", localDir, remoteDir)
 	keys, err := aes.NewKeyCombo()
 	if err != nil {
 		fmt.Printf("Failed to create keys for new sync: %v\n", err)

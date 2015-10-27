@@ -14,6 +14,8 @@ import (
 	"github.com/traherom/memstream"
 )
 
+const ProtFileExt = ".synced"
+
 // A Header contains the header of an encrypted file and the metadata needed to
 // work with that file
 type Header struct {
@@ -253,6 +255,7 @@ func (h *Header) Write() error {
 	}
 
 	// Move file to final location
+	// TODO create any needed directories?
 	protFile.Close()
 	err = moveFile(protFile.Name(), h.AbsRemotePath())
 	if err != nil {

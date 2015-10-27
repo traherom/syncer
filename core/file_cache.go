@@ -1,7 +1,7 @@
 package core
 
 import (
-	"database/sql"
+	"container/list"
 	"fmt"
 	"math/rand"
 	"os"
@@ -156,6 +156,84 @@ func (e *CacheEntry) Delete() error {
 	return nil
 }
 
+// MarkLocalSeen marks the entry as seen by the initial scan
+func (e *CacheEntry) MarkLocalSeen() error {
+	_, err := e.sync.db.Exec("UPDATE cache SET unseen_local=0 WHERE id=?", e.id)
+	if err != nil {
+		return &ErrCache{"Unable to mark entry as seen", err}
+	}
+
+	return nil
+}
+
+// MarkRemoteSeen marks the entry as seen by the initial scan
+func (e *CacheEntry) MarkRemoteSeen() error {
+	_, err := e.sync.db.Exec("UPDATE cache SET unseen_remote=0 WHERE id=?", e.id)
+	if err != nil {
+		return &ErrCache{"Unable to mark entry as seen", err}
+	}
+
+	return nil
+}
+
+// MarkAllEntriesUnseen preps for a full scan, where all cache entries have not been seen yet
+func (s *SyncInfo) MarkAllEntriesUnseen() error {
+	if _, err := s.db.Exec("UPDATE cache SET unseen_local=1, unseen_remote=1"); err != nil {
+		return &ErrSync{"Unable to mark entries as unseen", err}
+	}
+
+	return nil
+}
+
+// VariableScanner covers scanning from sql.Row and sql.Rows
+type VariableScanner interface {
+	Scan(...interface{}) error
+}
+
+// GetUnseenLocalEntries returns a list of all cache entries not marked as seen in the initial search.
+func (s *SyncInfo) GetUnseenLocalEntries() (unseen *list.List, err error) {
+	unseen = list.New()
+
+	rows, err := s.db.Query("SELECT id, rel_remote_path, rel_local_path, remote_hash, local_hash FROM cache WHERE unseen_local=1")
+	if err != nil {
+		return nil, &ErrSync{"Unable to locate unseen cache entries", err}
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		entry, err := scanToEntry(rows)
+		if err != nil {
+			return nil, &ErrSync{"Failed to read entry", err}
+		}
+
+		unseen.PushBack(entry)
+	}
+
+	return unseen, nil
+}
+
+// GetUnseenRemoteEntries returns a list of all cache entries not marked as seen in the initial search.
+func (s *SyncInfo) GetUnseenRemoteEntries() (unseen *list.List, err error) {
+	unseen = list.New()
+
+	rows, err := s.db.Query("SELECT id, rel_remote_path, rel_local_path, remote_hash, local_hash FROM cache WHERE unseen_remote=1")
+	if err != nil {
+		return nil, &ErrSync{"Unable to locate unseen cache entries", err}
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		entry, err := scanToEntry(rows)
+		if err != nil {
+			return nil, &ErrSync{"Failed to read entry", err}
+		}
+
+		unseen.PushBack(entry)
+	}
+
+	return unseen, nil
+}
+
 // GetCacheEntryViaLocal returns the file cache entry located via the relative local path given
 func GetCacheEntryViaLocal(s *SyncInfo, local string) (entry *CacheEntry, err error) {
 	row := s.db.QueryRow("SELECT id, rel_remote_path, rel_local_path, remote_hash, local_hash FROM cache WHERE rel_local_path=? LIMIT 1", local)
@@ -180,7 +258,7 @@ func GetCacheEntryViaRemote(s *SyncInfo, remote string) (entry *CacheEntry, err 
 	return
 }
 
-func scanToEntry(row *sql.Row) (*CacheEntry, error) {
+func scanToEntry(row VariableScanner) (*CacheEntry, error) {
 	entry := new(CacheEntry)
 	err := row.Scan(&entry.id,
 		&entry.remotePath,
@@ -209,7 +287,7 @@ func GetFreeRemotePath(s *SyncInfo) (path string, err error) {
 	}
 
 	for attempts := 0; attempts < 100; attempts++ {
-		path = RandStringBytes(32+attempts) + ".synced"
+		path = RandStringBytes(32+attempts) + ProtFileExt
 		if _, err = os.Stat(filepath.Join(s.RemoteBase(), path)); os.IsNotExist(err) {
 			return path, nil
 		}
