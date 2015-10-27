@@ -24,7 +24,7 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 )
 
-// pbkdf2Iterations
+// pbkdf2Iterations is used for key import and export (by password)
 const pbkdf2Iterations = 100000
 
 // SyncInfo stores information common to all files in a given Sync
@@ -112,12 +112,15 @@ func LoadSync(localPath string) (*SyncInfo, error) {
 		return nil, &ErrSync{"Failed to convert authentication key", err}
 	}
 
-	sync.keys = &gocrypt.KeyCombo{CryptoKey: cKey, AuthKey: aKey} // go vet complains about unkeyed fields, ignore
+	sync.keys = &gocrypt.KeyCombo{CryptoKey: cKey, AuthKey: aKey}
 
 	// Make sure everything loaded correctly
 	if err = sync.sanityCheckConfig(); err != nil {
 		return nil, err
 	}
+
+	log.Println("Cleaning sync")
+	sync.Clean()
 
 	return sync, nil
 }
@@ -200,6 +203,7 @@ func (s *SyncInfo) sanityCheckConfig() error {
 	return nil
 }
 
+// ProcessChange notifies the sync queue monitor that changes are ready to be pulled
 func (s *SyncInfo) ProcessChange() {
 	s.changesReady <- true
 }
@@ -379,15 +383,17 @@ func (s *SyncInfo) Set(name string, value string) (previous string, err error) {
 // This function expects to execute as a goroutine. Using the accepted channel,
 // passing in true will result in the monitor cleanly exiting its subcomponents.
 func (s *SyncInfo) Monitor(changes chan *Change, errors chan error, die chan bool) {
+	childDie := make(chan bool)
 	var wg sync.WaitGroup
 	defer func() {
+		close(childDie)
 		log.Println("Waiting for all monitor subprocessors to end")
 		wg.Wait()
 		log.Println("All monitoring ended")
 	}()
 
 	// Ensure we're ready for the change processor
-	PrepareChangeQueue(s)
+	prepareChangeQueue(s)
 
 	// Monitor for new changes anywhere in tree
 	localWatcher, err := watcherForDir(s.LocalBase())
@@ -407,7 +413,7 @@ func (s *SyncInfo) Monitor(changes chan *Change, errors chan error, die chan boo
 	// Scan for changes since last run
 	wg.Add(1)
 	go func() {
-		s.initialScan(changes, die)
+		s.initialScan(changes, childDie)
 		wg.Done()
 	}()
 
@@ -437,7 +443,7 @@ watchLoop:
 			}
 
 			// Get current remote path
-			if evt.Op != fsnotify.Create {
+			/*if evt.Op != fsnotify.Create {
 				entry, err := GetCacheEntryViaLocal(s, newChange.localPath)
 				if err != nil && err != sql.ErrNoRows {
 					errors <- &ErrSync{fmt.Sprintf("Unable to get remote path for %v\n", newChange.localPath), err}
@@ -446,9 +452,8 @@ watchLoop:
 					newChange.remotePath = entry.RemotePath()
 					newChange.cacheEntry = entry
 				}
-			}
+			}*/
 
-			log.Println("Pushing local change:", newChange)
 			changes <- newChange
 
 		case evt := <-remoteWatcher.Events:
@@ -472,7 +477,7 @@ watchLoop:
 			}
 
 			// Get current remote path
-			if evt.Op != fsnotify.Create {
+			/*if evt.Op != fsnotify.Create {
 				entry, err := GetCacheEntryViaRemote(s, newChange.remotePath)
 				if err != nil && err != sql.ErrNoRows {
 					errors <- &ErrSync{fmt.Sprintf("Unable to get local path for %v\n", newChange.remotePath), err}
@@ -481,9 +486,8 @@ watchLoop:
 					newChange.remotePath = entry.RemotePath()
 					newChange.cacheEntry = entry
 				}
-			}
+			}*/
 
-			log.Println("Pushing remote change:", newChange)
 			changes <- newChange
 
 		case err := <-localWatcher.Errors:
@@ -502,6 +506,11 @@ watchLoop:
 // this sync was monitored
 func (s *SyncInfo) initialScan(changes chan *Change, die chan bool) {
 
+}
+
+// Clean removes unneeded temp files, database entries, etc from the sync
+func (s *SyncInfo) Clean() error {
+	return cleanChangeQueue(s)
 }
 
 // watcherForDir creates a new filesystem watcher that monitors everything

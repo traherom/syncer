@@ -51,12 +51,59 @@ type Change struct {
 	id            int         // Internal database id of this change
 }
 
+func (c *Change) String() string {
+	switch c.changeType {
+	case LocalAdd:
+		return fmt.Sprintf("local add: %v", c.LocalPath())
+	case LocalChange:
+		return fmt.Sprintf("local change: %v", c.LocalPath())
+	case LocalDelete:
+		return fmt.Sprintf("local delete: %v", c.LocalPath())
+	case RemoteAdd:
+		return fmt.Sprintf("remote add: %v", c.RemotePath())
+	case RemoteChange:
+		return fmt.Sprintf("remote change: %v", c.RemotePath())
+	case RemoteDelete:
+		return fmt.Sprintf("remote delete: %v", c.RemotePath())
+	default:
+		return fmt.Sprintf("%#v", c)
+	}
+}
+
+// LocalPath returns the relative local path of the change
+func (c *Change) LocalPath() string {
+	if c.cacheEntry != nil && c.cacheEntry.LocalPath() != c.localPath {
+		panic("Cache entry and change path local paths do not match")
+	}
+
+	return c.localPath
+}
+
+// RemotePath returns the relative remote path of the change
+func (c *Change) RemotePath() string {
+	if c.cacheEntry != nil && c.cacheEntry.RemotePath() != c.remotePath {
+		panic("Cache entry and change path remote paths do not match")
+	}
+
+	return c.remotePath
+}
+
 // ChangeQueueManager establishes change processing workers and farms work out
 // to them as needed.
 func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, errors chan error, die chan bool) {
+	// Need to keep track of which syncs have dequeue managers already running
+	childDie := make(chan bool)
+	managedSyncs := make([]*SyncInfo, 0, 5)
+
 	// Establish workers
 	var wg sync.WaitGroup
 	defer func() {
+		log.Println("Signalling all processing to end")
+		close(childDie)
+		for _, s := range managedSyncs {
+			close(s.changesReady)
+		}
+
 		log.Println("Waiting for all processors to end")
 		wg.Wait()
 		log.Println("All processors ended")
@@ -69,20 +116,18 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 	completed := make(chan *Change)
 
 	// TODO could launch more
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
-		changeProcessor(todo, completed, failed, errors, die)
+		changeProcessor(todo, completed, failed, errors, childDie)
+		wg.Done()
 	}()
-
-	// Need to keep track of which syncs have dequeue managers already running
-	managedSyncs := make([]*SyncInfo, 0, 5)
 
 	for {
 		// Any time we receive a new change or complete/fail processing on a change,
 		// put a new item from that sync into the processing channel
 		select {
 		case change := <-newChanges:
-			log.Println("Got change", change)
+			log.Printf("%#v", change.cacheEntry)
 			if err := queueChange(change); err != nil {
 				errors <- err
 				break
@@ -99,17 +144,28 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 			}
 			if !found {
 				managedSyncs = append(managedSyncs, change.sync)
-				changePusher(change.sync, todo, errors, die)
+				wg.Add(1)
+				go func() {
+					changePusher(change.sync, todo, errors, childDie)
+					wg.Done()
+				}()
 			}
 
-			log.Println("calling process change")
 			change.sync.ProcessChange()
 
 		case change := <-failed:
 			// For whatever reason, this change failed ot go through. We'll try again
 			// TODO announce error in some way
-			newChanges <- change
-			change.sync.ProcessChange()
+			log.Printf("Change %v failed, will try again", change)
+			wg.Add(1)
+			go func() {
+				select {
+				case newChanges <- change:
+					change.sync.ProcessChange()
+				case <-childDie:
+				}
+				wg.Done()
+			}()
 
 		case change := <-completed:
 			// Drop change from database
@@ -132,7 +188,7 @@ func ChangeQueueManager(newChanges chan *Change, completedChanges chan *Change, 
 // Closing the input channel OR the die channel will end the pusher.
 func changePusher(sync *SyncInfo, processingChannel chan *Change, errors chan error, die chan bool) {
 	defer func() {
-		log.Printf("Stopping queue watcher for %v\n", sync.LocalBase())
+		log.Printf("Stopped queue watcher for %v\n", sync.LocalBase())
 	}()
 	log.Printf("Starting queue watcher for %v\n", sync.LocalBase())
 
@@ -150,7 +206,6 @@ func changePusher(sync *SyncInfo, processingChannel chan *Change, errors chan er
 			return
 		}
 
-		log.Println("Getting ready to push next change")
 		pushNextChange(sync, processingChannel, errors, die)
 	}
 }
@@ -176,8 +231,8 @@ func pushNextChange(sync *SyncInfo, processingChannel chan *Change, errors chan 
 	}
 
 	// Fill as much as we can
-	if change.localPath != "" {
-		change.cacheEntry, err = GetCacheEntryViaLocal(change.sync, change.localPath)
+	if change.LocalPath() != "" {
+		change.cacheEntry, err = GetCacheEntryViaLocal(change.sync, change.LocalPath())
 		if err != nil && err != sql.ErrNoRows {
 			errors <- err
 		}
@@ -195,11 +250,9 @@ func pushNextChange(sync *SyncInfo, processingChannel chan *Change, errors chan 
 	}
 
 	// Try to push for a bit, then give up
-	log.Println("Got change, trying to push", change)
 	timeout := time.After(5 * time.Second)
 	select {
 	case processingChannel <- change:
-		log.Println("Pushed", change)
 		_, err = change.sync.db.Exec("UPDATE change_queue SET processing=1 WHERE id=?", change.id)
 		if err != nil {
 			errors <- &ErrProcessor{"Unable to mark change as in-progress", err}
@@ -238,7 +291,7 @@ func queueChange(change *Change) error {
 																			(time_added, change_type, rel_local_path, rel_remote_path)
 																			VALUES
 																			(datetime('now'), ?, ?, ?)`,
-		change.changeType, change.localPath, change.remotePath)
+		change.changeType, change.LocalPath(), change.RemotePath())
 	if err != nil {
 		return &ErrProcessor{"Unable to put change into database", err}
 	}
@@ -272,9 +325,9 @@ func changeProcessor(incoming chan *Change, completed chan *Change, failed chan 
 					change.remotePath = remotePath
 				} else {
 					// Current entry, so open the file and compare to current data
-					prot, err := OpenProtectedFile(change.sync, change.remotePath)
+					prot, err := OpenProtectedFile(change.sync, change.RemotePath())
 					if err != nil {
-						// TODO doesn't necessarily need to fail, we could try to overwrite it
+						// If we couldn't open it, we should fail because it might mean an encryption error (user has incorrect keys)
 						errors <- &ErrProcessor{"Unable to open existing remote file", err}
 						failed <- change
 						break
@@ -283,7 +336,7 @@ func changeProcessor(incoming chan *Change, completed chan *Change, failed chan 
 				}
 
 				// Create/update remote
-				ignoreID, err := addIgnore(change.sync, false, change.remotePath)
+				ignoreID, err := addIgnore(change.sync, false, change.RemotePath())
 				if err != nil {
 					errors <- err
 					failed <- change
@@ -291,7 +344,7 @@ func changeProcessor(incoming chan *Change, completed chan *Change, failed chan 
 				}
 
 				if change.protectedFile == nil {
-					change.protectedFile, err = CreateProtectedFile(change.sync, change.remotePath, change.localPath)
+					change.protectedFile, err = CreateProtectedFile(change.sync, change.RemotePath(), change.LocalPath())
 				} else {
 					// TODO we should check if hashes match up and avoid extra work here if possible
 					err = change.protectedFile.Write()
@@ -320,19 +373,28 @@ func changeProcessor(incoming chan *Change, completed chan *Change, failed chan 
 				if change.cacheEntry == nil {
 					// Report this as completed because we may have just not created the entry yet
 					// IE, maybe it was a short-lived temp file
-					errors <- &ErrProcessor{fmt.Sprintf("Local file %v deleted, but no remote found", change.localPath), nil}
+					errors <- &ErrProcessor{fmt.Sprintf("Local file %v deleted, but no remote found", change.LocalPath()), nil}
 					completed <- change
 					break
 				}
 
-				entry := change.cacheEntry
-				if err := os.Remove(entry.AbsRemotePath()); err != nil {
-					errors <- &ErrProcessor{fmt.Sprintf("Removal of remote file %v failed", entry.AbsRemotePath()), err}
+				ignoreID, err := addIgnore(change.sync, false, change.RemotePath())
+				if err != nil {
+					errors <- err
+				}
+
+				err = removeIgnoreAfterHit(change.sync, ignoreID)
+				if err != nil {
+					errors <- &ErrProcessor{"Failed to remove ignore", err}
+				}
+
+				if err = os.Remove(change.cacheEntry.AbsRemotePath()); err != nil {
+					errors <- &ErrProcessor{fmt.Sprintf("Removal of remote file %v failed", change.cacheEntry.AbsRemotePath()), err}
 					failed <- change
 					break
 				}
 
-				if err := entry.Delete(); err != nil {
+				if err := change.cacheEntry.Delete(); err != nil {
 					errors <- &ErrProcessor{"Failed to remove cache entry", err}
 				} else {
 					change.cacheEntry = nil
@@ -345,7 +407,7 @@ func changeProcessor(incoming chan *Change, completed chan *Change, failed chan 
 			case RemoteChange:
 				// Extract new contents
 				// TODO add accessor function to Change and have them validate things like change.remotePath == change.cacheEntry.remotePath
-				prot, err := OpenProtectedFile(change.sync, change.remotePath)
+				prot, err := OpenProtectedFile(change.sync, change.RemotePath())
 				if err != nil {
 					errors <- &ErrProcessor{"Unable to open protected file", err}
 					failed <- change
@@ -355,10 +417,23 @@ func changeProcessor(incoming chan *Change, completed chan *Change, failed chan 
 				change.protectedFile = prot
 				change.localPath = prot.LocalPath()
 
-				if err = prot.ExtractContents(); err != nil {
+				ignoreID, err := addIgnore(change.sync, true, change.LocalPath())
+				if err != nil {
+					errors <- err
+					failed <- change
+					break
+				}
+
+				err = prot.ExtractContents()
+				ignoreErr := removeIgnore(change.sync, ignoreID)
+
+				if err != nil {
 					errors <- &ErrProcessor{"Unable to write local file", err}
 					failed <- change
 					break
+				}
+				if ignoreErr != nil {
+					errors <- &ErrProcessor{"Failed to remove ignore", err}
 				}
 
 				// Update file cache
@@ -374,18 +449,27 @@ func changeProcessor(incoming chan *Change, completed chan *Change, failed chan 
 				if change.cacheEntry == nil {
 					// Report this as completed because we may have just not created the entry yet
 					// IE, maybe it was a short-lived temp file
-					errors <- &ErrProcessor{fmt.Sprintf("Remote file %v deleted, but no local found", change.remotePath), nil}
+					errors <- &ErrProcessor{fmt.Sprintf("Remote file %v deleted, but no local found", change.RemotePath()), nil}
 					completed <- change
 					break
 				}
 
-				entry := change.cacheEntry
-				if err := os.Remove(entry.AbsLocalPath()); err != nil {
-					errors <- &ErrProcessor{fmt.Sprintf("Removal of local file %v failed", entry.AbsRemotePath()), err}
+				ignoreID, err := addIgnore(change.sync, true, change.LocalPath())
+				if err != nil {
+					errors <- err
+				}
+				if err := removeIgnoreAfterHit(change.sync, ignoreID); err != nil {
+					errors <- &ErrProcessor{"Failed to remove ignore", err}
 				}
 
-				if err := entry.Delete(); err != nil {
-					errors <- &ErrProcessor{"Failed to remove cache entry", err}
+				if err := os.Remove(change.cacheEntry.AbsLocalPath()); err != nil {
+					errors <- &ErrProcessor{fmt.Sprintf("Removal of local file %v failed", change.cacheEntry.AbsRemotePath()), err}
+					failed <- change
+					break
+				}
+
+				if err := change.cacheEntry.Delete(); err != nil {
+					errors <- &ErrProcessor{"Failed to remove cache change.cacheEntry", err}
 				}
 
 				completed <- change
@@ -405,8 +489,8 @@ func updateCache(change *Change) error {
 	if change.cacheEntry == nil {
 		// No cache entry yet, so we need to get it started
 		change.cacheEntry = NewCacheEntry(change.sync,
-			change.remotePath,
-			change.localPath,
+			change.RemotePath(),
+			change.LocalPath(),
 			nil, // Going to set these just below (hashes)
 			nil)
 	}
@@ -429,6 +513,7 @@ func updateCache(change *Change) error {
 }
 
 func addIgnore(sync *SyncInfo, isLocal bool, relPath string) (id int64, err error) {
+	log.Println("Adding ignore on", relPath)
 	res, err := sync.db.Exec(`INSERT INTO temp_ignores
 												(expires, is_local, rel_path)
 												VALUES
@@ -440,7 +525,18 @@ func addIgnore(sync *SyncInfo, isLocal bool, relPath string) (id int64, err erro
 	return res.LastInsertId()
 }
 
+// removeIgnoreAfterHit marks the given ignore line to be remove AFTER it is seen once
+func removeIgnoreAfterHit(sync *SyncInfo, id int64) error {
+	_, err := sync.db.Exec("UPDATE temp_ignores SET ignore_once=1 WHERE id=?", id)
+	if err != nil {
+		return &ErrProcessor{"Unable to set ignore to be removed next hit", err}
+	}
+
+	return nil
+}
+
 func removeIgnore(sync *SyncInfo, id int64) error {
+	log.Println("Removing ignore", id)
 	_, err := sync.db.Exec("DELETE FROM temp_ignores WHERE id=?", id)
 	if err != nil {
 		return &ErrProcessor{"Failed to remove ignore", err}
@@ -459,19 +555,19 @@ func shouldIgnore(change *Change) (bool, error) {
 		fallthrough
 	case LocalDelete:
 		isLocal = true
-		path = change.localPath
+		path = change.LocalPath()
 	case RemoteAdd:
 		fallthrough
 	case RemoteChange:
 		fallthrough
 	case RemoteDelete:
 		isLocal = false
-		path = change.remotePath
+		path = change.RemotePath()
 	default:
 		return false, &ErrProcessor{fmt.Sprintf("Unexpected change type %v in shouldIgnore", change.changeType), nil}
 	}
 
-	rows, err := change.sync.db.Query(`SELECT id
+	rows, err := change.sync.db.Query(`SELECT id, ignore_once
 																			FROM temp_ignores
 																			WHERE expires > datetime('now') AND is_local=? AND rel_path=?
 																			LIMIT 1`,
@@ -487,6 +583,21 @@ func shouldIgnore(change *Change) (bool, error) {
 
 	if rows.Next() {
 		// We must have found rows that match
+		// Should we remove the hit we found?
+		var id int64
+		var ignoreOnce bool
+		err = rows.Scan(&id, &ignoreOnce)
+		if err != nil {
+			log.Println("Error checking remove once status:", err)
+		}
+
+		if ignoreOnce {
+			rows.Close()
+			if err = removeIgnore(change.sync, id); err != nil {
+				log.Println("Error removing ignore:", err)
+			}
+		}
+
 		return true, nil
 	}
 
@@ -497,8 +608,8 @@ func conflictExists(change *Change) (bool, error) {
 	rows, err := change.sync.db.Query(`SELECT id, change_type, rel_local_path, rel_remote_path
 																						FROM change_queue
 																						WHERE rel_local_path=? OR rel_remote_path=?`,
-		change.localPath,
-		change.remotePath)
+		change.LocalPath(),
+		change.RemotePath())
 	if err == sql.ErrNoRows {
 		// TODO again, not sure if this can ever happen
 		return false, nil
@@ -527,7 +638,7 @@ func conflictExists(change *Change) (bool, error) {
 
 // PrepareChangeQueue readies the given sync for use with the change queue manager, including establishing
 // the database schema and ensuring the queue is currently empty.
-func PrepareChangeQueue(sync *SyncInfo) error {
+func prepareChangeQueue(sync *SyncInfo) error {
 	schema := `
 	  CREATE TABLE IF NOT EXISTS change_queue (id INTEGER PRIMARY KEY,
 				                                     time_added DATETIME DEFAULT current_timestamp,
@@ -541,6 +652,7 @@ func PrepareChangeQueue(sync *SyncInfo) error {
 
 	  CREATE TABLE IF NOT EXISTS temp_ignores (id INTEGER PRIMARY KEY,
 											                       expires INT8 NOT NULL,
+                                             ignore_once BOOLEAN NOT NULL DEFAULT 0,
 										                         is_local BOOLEAN NOT NULL,
 										                         rel_path TEXT NOT NULL);
 
@@ -550,4 +662,15 @@ func PrepareChangeQueue(sync *SyncInfo) error {
 
 	_, err := sync.db.Exec(schema)
 	return err
+}
+
+// cleanChangeQueue removes ignores it knows are safe to delete. It does not wipe the
+// change queue because that may still be current, if monitoring is active.
+func cleanChangeQueue(sync *SyncInfo) error {
+	_, err := sync.db.Exec("DELETE FROM temp_ignores WHERE expires < datetime('now')")
+	if err != nil {
+		return &ErrProcessor{"Unable to empty ignores", err}
+	}
+
+	return nil
 }

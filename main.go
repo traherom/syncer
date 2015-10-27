@@ -158,8 +158,15 @@ func monitorSync(c *cli.Context) {
 		wg.Done()
 	}()
 
-	log.Println("Monitoring started, press <enter> to end")
+	// If all our children die, end the main program
 	end := make(chan bool)
+	go func() {
+		wg.Wait()
+		close(end)
+		log.Println("All children have died, exiting")
+	}()
+
+	log.Println("Monitoring started")
 	/*go func() {
 		fmt.Scanln()
 		close(end)

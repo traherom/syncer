@@ -6,9 +6,15 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/traherom/gocrypt"
 )
+
+func init() {
+	// Seed PRNG for random filenames
+	rand.Seed(time.Now().Unix())
+}
 
 // ErrCache is a universal error type for all sync issues
 type ErrCache struct {
