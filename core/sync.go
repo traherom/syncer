@@ -20,6 +20,7 @@ import (
 	"github.com/traherom/fsnotifydeep"
 	"github.com/traherom/gocrypt"
 	"github.com/traherom/gocrypt/aes"
+	"github.com/traherom/gocrypt/hash"
 	"github.com/traherom/memstream"
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -550,7 +551,23 @@ func (s *SyncInfo) initialScan(changes chan *Change, errors chan error, die chan
 				errors <- err
 			}
 
-			// Is it changed? TODO
+			// Is it changed?
+			sum, err := hash.Sha256File(entry.AbsLocalPath())
+			if err != nil {
+				errors <- &ErrSync{"Error checking for change", err}
+				return nil
+			}
+
+			if bytes.Compare(entry.LocalHash(), sum) != 0 {
+				// Changed
+				changes <- &Change{
+					localPath:  entry.LocalPath(),
+					remotePath: entry.RemotePath(),
+					changeType: LocalChange,
+					cacheEntry: entry,
+					sync:       s,
+				}
+			}
 
 			return nil
 		})
@@ -577,13 +594,14 @@ func (s *SyncInfo) initialScan(changes chan *Change, errors chan error, die chan
 			}
 		}
 
+		log.Println("Initial local scan complete")
 		wg.Done()
 	}()
 
 	// Scan remote
 	wg.Add(1)
 	go func() {
-		filepath.Walk(s.LocalBase(), func(path string, info os.FileInfo, err error) error {
+		filepath.Walk(s.RemoteBase(), func(path string, info os.FileInfo, err error) error {
 			if !strings.HasSuffix(path, ProtFileExt) {
 				return nil
 			}
@@ -614,7 +632,23 @@ func (s *SyncInfo) initialScan(changes chan *Change, errors chan error, die chan
 				errors <- err
 			}
 
-			// Is it changed? TODO
+			// Is it changed?
+			sum, err := hash.Sha256File(entry.AbsRemotePath())
+			if err != nil {
+				errors <- &ErrSync{"Error checking for change", err}
+				return nil
+			}
+
+			if bytes.Compare(entry.RemoteHash(), sum) != 0 {
+				// Changed
+				changes <- &Change{
+					remotePath: entry.RemotePath(),
+					localPath:  entry.LocalPath(),
+					changeType: RemoteChange,
+					cacheEntry: entry,
+					sync:       s,
+				}
+			}
 
 			return nil
 		})
@@ -641,10 +675,12 @@ func (s *SyncInfo) initialScan(changes chan *Change, errors chan error, die chan
 			}
 		}
 
+		log.Println("Initial remote scan complete")
 		wg.Done()
 	}()
 
 	wg.Wait()
+	log.Println("Initial scan complete")
 }
 
 // Clean removes unneeded temp files, database entries, etc from the sync
